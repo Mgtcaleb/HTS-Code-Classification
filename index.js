@@ -18,11 +18,67 @@ const USITC_LOOKUP_URL = 'https://datawebws.usitc.gov/dataweb/api/v2/tariff/curr
 const USITC_DETAILS_URL = 'https://datawebws.usitc.gov/dataweb/api/v2/tariff/currentTariffDetails';
 const TARIFF_YEAR = '2024';
 
-const KEYWORD_EXTRACTION_PROMPT = `You are a customs classification engine.
-Analyze the product title and determine the 3 most likely 4-digit Harmonized System (HS) heading numbers for the core physical item.
-You MUST ignore all brand names and marketing adjectives (like "soft", "luxury", "secure", "cottony", "best", "regular", etc).
-Focus entirely on what the physical product actually is.
-Respond ONLY with a comma-separated list of the three 4-digit numbers. Do not provide any explanations, text, or extra characters.`;
+// ── In-memory cache: same product title → same result, zero tokens ──
+const resultCache = new Map();
+
+// ── Marketing / filler words to strip before searching USITC (FREE, no LLM) ──
+const STOPWORDS = new Set([
+    // marketing
+    'best', 'premium', 'luxury', 'pro', 'ultra', 'super', 'mega', 'elite', 'deluxe',
+    'new', 'latest', 'advanced', 'original', 'genuine', 'authentic', 'official',
+    'exclusive', 'special', 'limited', 'edition', 'upgraded', 'improved', 'enhanced',
+    // adjectives
+    'soft', 'cottony', 'secure', 'regular', 'extra', 'large', 'small', 'medium',
+    'big', 'mini', 'slim', 'thin', 'thick', 'heavy', 'light', 'lightweight',
+    'durable', 'portable', 'foldable', 'adjustable', 'flexible', 'comfortable',
+    'strong', 'sturdy', 'smooth', 'sleek', 'modern', 'classic', 'stylish',
+    'fashionable', 'elegant', 'beautiful', 'pretty', 'cute', 'cool', 'hot',
+    'warm', 'cold', 'dry', 'wet', 'waterproof', 'dustproof', 'shockproof',
+    'invisible', 'clear', 'transparent', 'opaque', 'matte', 'glossy',
+    // colors
+    'black', 'white', 'red', 'blue', 'green', 'yellow', 'pink', 'purple',
+    'orange', 'brown', 'grey', 'gray', 'silver', 'gold', 'golden', 'multicolor',
+    // fillers
+    'for', 'with', 'and', 'the', 'of', 'in', 'on', 'at', 'to', 'by', 'from',
+    'pack', 'pcs', 'set', 'piece', 'pieces', 'pair', 'pairs', 'unit', 'units',
+    'combo', 'bundle', 'lot', 'box', 'case', 'bag',
+    'free', 'bpa', 'eco', 'friendly', 'non', 'toxic', 'safe',
+    'suitable', 'ideal', 'perfect', 'great', 'good', 'nice', 'fine',
+    'home', 'kitchen', 'office', 'outdoor', 'indoor', 'travel', 'daily', 'use',
+    // size / quantity patterns handled separately
+    'ml', 'oz', 'gm', 'kg', 'cm', 'mm', 'inch', 'ft', 'liter', 'litre',
+]);
+
+/**
+ * Extract 2-3 meaningful product keywords from a title — NO LLM needed.
+ * Strips brands (usually first word), marketing fluff, sizes, and punctuation.
+ */
+function extractKeywords(title) {
+    // Normalise: lowercase, strip special chars except alphanumeric and spaces
+    let cleaned = title.toLowerCase()
+        .replace(/[|,()[\]{}&\/\\]+/g, ' ')   // pipes, parens, etc → space
+        .replace(/[^a-z0-9\s-]/g, '')          // remove remaining special chars
+        .replace(/\b\d+\s*(ml|oz|gm|g|kg|cm|mm|inch|ft|liter|litre|pack|pcs|pieces|pair)\b/g, '') // remove measurements
+        .replace(/\b\d+\b/g, '')               // remove standalone numbers
+        .replace(/\s+/g, ' ')                  // collapse whitespace
+        .trim();
+
+    const words = cleaned.split(' ').filter(w => w.length > 1);
+
+    // Remove stopwords
+    const meaningful = words.filter(w => !STOPWORDS.has(w));
+
+    // Take up to 3 most meaningful words (skip first word — usually the brand)
+    let keywords = meaningful;
+    if (keywords.length > 3) {
+        keywords = keywords.slice(1, 4); // skip brand, take next 3
+    }
+
+    // Deduplicate
+    keywords = [...new Set(keywords)];
+
+    return keywords.length > 0 ? keywords : [cleaned.split(' ')[0] || title.substring(0, 20)];
+}
 
 const SELECTION_PROMPT = `You are a global shipping export and customs compliance expert.
 
@@ -36,13 +92,13 @@ Follow these rules strictly:
 - Avoid generic terms such as beverage parts accessories item goods.
 - Each product title must include the brand name exact product type quantity or pack size material or composition if relevant and intended function or use.
 
-CRITICAL INSTRUCTION: You MUST select the HS Code EXACTLY from the provided "Valid USITC Candidates" list. Do NOT invent, guess, or use an HS code from your internal memory. If no exact match exists, pick the closest matching code FROM THE LIST.
+CRITICAL INSTRUCTION: You MUST select the HS Code EXACTLY as it appears in the provided "Valid USITC Candidates" list. Copy the code character-for-character. Do NOT invent, modify, guess, or use an HS code from your internal memory. If no perfect match exists, pick the closest matching code FROM THE LIST.
 
 Output format strictly:
 
 product name: [Refined customs compliant product title]
-HS Code: [Accurate 8 digit HS Code selected ONLY from the provided candidates]
-article description: [Official article description of the selected HS Code EXACTLY as it appears in the candidates list]
+HS Code: [Code copied EXACTLY from the candidates list]
+article description: [Official article description copied EXACTLY from the candidates list]
 
 Do not provide explanations or extra commentary. Return only the formatted result.`;
 
@@ -88,21 +144,19 @@ app.post('/api/classify', async (req, res) => {
             return res.status(400).json({ error: 'productTitle is required in the request body.' });
         }
 
-        console.log('Step 1: Extracting search keywords...');
-        const keywordResponse = await openai.chat.completions.create({
-            model: OPENROUTER_MODEL,
-            temperature: 0,
-            messages: [
-                { role: 'system', content: KEYWORD_EXTRACTION_PROMPT },
-                { role: 'user', content: productTitle }
-            ]
-        });
-        const keywordsText = keywordResponse.choices[0].message.content.trim();
-        const keywords = keywordsText.split(',').map(k => k.trim()).filter(k => /^\d{4}$/.test(k));
-        if (keywords.length === 0) keywords.push(keywordsText); // fallback
-        
+        // ── Cache check: if we already classified this exact title, return instantly (0 tokens) ──
+        const cacheKey = productTitle.trim().toLowerCase();
+        if (resultCache.has(cacheKey)) {
+            console.log('Cache HIT — returning cached result (0 tokens used).');
+            return res.json(resultCache.get(cacheKey));
+        }
+
+        // ── Step 1: Extract keywords programmatically (FREE — no LLM call) ──
+        console.log('Step 1: Extracting keywords (programmatic — no LLM)...');
+        const keywords = extractKeywords(productTitle);
         console.log(`Extracted Keywords: ${keywords.join(', ')}`);
 
+        // ── Step 2: Search USITC with each keyword ──
         console.log('Step 2: Fetching USITC Tariffs...');
         let allCandidates = [];
         for (const kw of keywords) {
@@ -125,10 +179,11 @@ app.post('/api/classify', async (req, res) => {
         
         console.log(`Found ${allCandidates.length} raw candidates. Sending top ${topCandidates.length} unique candidates to LLM.`);
 
-        // Build a numbered list so the LLM can reference by number
+        // Build a numbered list so the LLM can reference easily
         const candidateListText = topCandidates.map((c, i) => `${i+1}. Code: ${c.code} | Description: ${c.description}`).join('\n');
 
-        console.log('Step 3: Selecting best HS Code...');
+        // ── Step 3: Single LLM call to pick best match + rewrite title ──
+        console.log('Step 3: Selecting best HS Code (single LLM call)...');
         const selectionResponse = await openai.chat.completions.create({
             model: OPENROUTER_MODEL,
             temperature: 0,
@@ -161,14 +216,12 @@ app.post('/api/classify', async (req, res) => {
             const validCodes = topCandidates.map(c => c.code);
             
             if (validCodes.includes(llmCode)) {
-                // Perfect match - use it directly
                 hsCode = llmCode;
                 console.log(`Code ${hsCode} is valid (found in candidate list).`);
             } else {
                 // LLM hallucinated a code. Find the closest match from the real list.
                 console.log(`Code ${llmCode} NOT found in candidate list. Finding closest match...`);
                 
-                // First try prefix match (e.g. LLM said 39269090 but real code is 39269080)
                 let bestMatch = null;
                 let bestMatchLength = 0;
                 for (const candidate of topCandidates) {
@@ -188,7 +241,6 @@ app.post('/api/classify', async (req, res) => {
                     articleDescription = bestMatch.description;
                     console.log(`Snapped to closest valid code: ${hsCode} (${articleDescription})`);
                 } else {
-                    // Ultimate fallback: use the first candidate
                     hsCode = topCandidates[0].code;
                     articleDescription = topCandidates[0].description;
                     console.log(`Fallback to first candidate: ${hsCode}`);
@@ -203,12 +255,12 @@ app.post('/api/classify', async (req, res) => {
             }
         }
 
-        // Step 4: Fetch rate using the VALIDATED code
+        // ── Step 4: Fetch rate using the VALIDATED code ──
         if (hsCode) {
             console.log(`Step 4: Fetching Duty Rate for validated code: ${hsCode}...`);
             rate = await getTariffRate(hsCode);
             
-            // If rate lookup fails, try trimming/padding the code
+            // If rate lookup fails, try trimming the code
             if (rate === "Unknown" && hsCode.length > 8) {
                 const trimmed = hsCode.substring(0, 8);
                 console.log(`Rate not found. Retrying with trimmed code: ${trimmed}`);
@@ -226,7 +278,13 @@ app.post('/api/classify', async (req, res) => {
             dutyRate: rate
         };
 
-        res.json({ result: finalResult, data: structuredData });
+        const responsePayload = { result: finalResult, data: structuredData };
+
+        // ── Cache the result ──
+        resultCache.set(cacheKey, responsePayload);
+        console.log('Result cached for future lookups.');
+
+        res.json(responsePayload);
     } catch (error) {
         console.error('Error classifying product:', error);
         res.status(500).json({ error: 'Failed to process request', details: error.message });
