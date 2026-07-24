@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HS Code Classification</title>
+    <!-- Use Google Fonts (Inter) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="background-effect"></div>
+    <div class="container">
+        <header>
+            <h1>Global Customs Classification</h1>
+            <p>Paste multiple product titles (one per line) below to dynamically assign accurate 8-digit HS Codes via USITC.</p>
+        </header>
+
+        <main>
+            <div class="glass-panel form-panel">
+                <form id="classify-form">
+                    <div class="form-group">
+                        <label for="product-titles">Product Descriptions</label>
+                        <textarea id="product-titles" name="product-titles" placeholder="Sony Alpha a7 III Mirrorless Camera with 28-70mm Lens&#10;CELLO Aurum Luxury Inner Stainless Steel Insulated Hot-Pot..." required></textarea>
+                    </div>
+                    <button type="submit" id="submit-btn">
+                        <span class="btn-text">Classify Items</span>
+                        <span class="spinner hidden"></span>
+                    </button>
+                </form>
+            </div>
+
+            <div class="glass-panel results-panel hidden" id="results-panel">
+                <div class="results-header">
+                    <h2>Classification Results</h2>
+                    <button type="button" id="download-btn" class="secondary-btn">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 8px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                        Download CSV
+                    </button>
+                </div>
+                <div class="table-container">
+                    <table id="results-table">
+                        <thead>
+                            <tr>
+                                <th>Original Title</th>
+                                <th>Refined Name</th>
+                                <th>HS Code</th>
+                                <th>Article Description</th>
+                                <th>Duty Rate</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="results-body">
+                            <!-- Rows injected via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
