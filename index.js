@@ -125,39 +125,104 @@ app.post('/api/classify', async (req, res) => {
         
         console.log(`Found ${allCandidates.length} raw candidates. Sending top ${topCandidates.length} unique candidates to LLM.`);
 
+        // Build a numbered list so the LLM can reference by number
+        const candidateListText = topCandidates.map((c, i) => `${i+1}. Code: ${c.code} | Description: ${c.description}`).join('\n');
+
         console.log('Step 3: Selecting best HS Code...');
         const selectionResponse = await openai.chat.completions.create({
             model: OPENROUTER_MODEL,
             temperature: 0,
             messages: [
                 { role: 'system', content: SELECTION_PROMPT },
-                { role: 'user', content: `Original Product Title: ${productTitle}\n\nUSITC Candidates:\n${JSON.stringify(topCandidates, null, 2)}` }
+                { role: 'user', content: `Original Product Title: ${productTitle}\n\nValid USITC Candidates (you MUST pick from this list):\n${candidateListText}` }
             ]
         });
         const selectionText = selectionResponse.choices[0].message.content.trim();
+        console.log('LLM raw output:', selectionText);
 
-        console.log('Step 4: Fetching Duty Rate...');
-        let finalResult = selectionText;
+        // Extract the HS code the LLM chose
         let hsCode = "";
-        let rate = "Unknown";
-        const hsCodeMatch = selectionText.match(/HS Code:\s*(\d{8})/i);
-        if (hsCodeMatch && hsCodeMatch[1]) {
-            hsCode = hsCodeMatch[1];
-            console.log(`Fetching rate for HS Code: ${hsCode}`);
-            rate = await getTariffRate(hsCode);
-            finalResult += `\ngeneral duty rate: ${rate}`;
-        } else {
-            console.log('Could not parse 8-digit HS Code from LLM output. Rate lookup skipped.');
-            finalResult += `\ngeneral duty rate: Unknown`;
-        }
+        let rate = "N/A";
+        let articleDescription = "";
+        let productName = "";
         
+        const hsCodeMatch = selectionText.match(/HS Code:\s*(\d{6,10})/i);
         const productNameMatch = selectionText.match(/product name:\s*(.*)/i);
         const articleDescMatch = selectionText.match(/article description:\s*(.*)/i);
+        
+        productName = productNameMatch ? productNameMatch[1].trim() : "";
+        articleDescription = articleDescMatch ? articleDescMatch[1].trim() : "";
+
+        if (hsCodeMatch && hsCodeMatch[1]) {
+            let llmCode = hsCodeMatch[1];
+            console.log(`LLM selected code: ${llmCode}`);
+            
+            // VALIDATION: Check if the LLM's code actually exists in our candidate list
+            const validCodes = topCandidates.map(c => c.code);
+            
+            if (validCodes.includes(llmCode)) {
+                // Perfect match - use it directly
+                hsCode = llmCode;
+                console.log(`Code ${hsCode} is valid (found in candidate list).`);
+            } else {
+                // LLM hallucinated a code. Find the closest match from the real list.
+                console.log(`Code ${llmCode} NOT found in candidate list. Finding closest match...`);
+                
+                // First try prefix match (e.g. LLM said 39269090 but real code is 39269080)
+                let bestMatch = null;
+                let bestMatchLength = 0;
+                for (const candidate of topCandidates) {
+                    let matchLen = 0;
+                    for (let i = 0; i < Math.min(llmCode.length, candidate.code.length); i++) {
+                        if (llmCode[i] === candidate.code[i]) matchLen++;
+                        else break;
+                    }
+                    if (matchLen > bestMatchLength) {
+                        bestMatchLength = matchLen;
+                        bestMatch = candidate;
+                    }
+                }
+                
+                if (bestMatch) {
+                    hsCode = bestMatch.code;
+                    articleDescription = bestMatch.description;
+                    console.log(`Snapped to closest valid code: ${hsCode} (${articleDescription})`);
+                } else {
+                    // Ultimate fallback: use the first candidate
+                    hsCode = topCandidates[0].code;
+                    articleDescription = topCandidates[0].description;
+                    console.log(`Fallback to first candidate: ${hsCode}`);
+                }
+            }
+        } else {
+            console.log('Could not parse HS Code from LLM output.');
+            if (topCandidates.length > 0) {
+                hsCode = topCandidates[0].code;
+                articleDescription = topCandidates[0].description;
+                console.log(`Fallback to first candidate: ${hsCode}`);
+            }
+        }
+
+        // Step 4: Fetch rate using the VALIDATED code
+        if (hsCode) {
+            console.log(`Step 4: Fetching Duty Rate for validated code: ${hsCode}...`);
+            rate = await getTariffRate(hsCode);
+            
+            // If rate lookup fails, try trimming/padding the code
+            if (rate === "Unknown" && hsCode.length > 8) {
+                const trimmed = hsCode.substring(0, 8);
+                console.log(`Rate not found. Retrying with trimmed code: ${trimmed}`);
+                rate = await getTariffRate(trimmed);
+                if (rate !== "Unknown") hsCode = trimmed;
+            }
+        }
+
+        const finalResult = `product name: ${productName}\nHS Code: ${hsCode}\narticle description: ${articleDescription}\ngeneral duty rate: ${rate}`;
 
         const structuredData = {
-            productName: productNameMatch ? productNameMatch[1].trim() : "",
-            hsCode: hsCode,
-            articleDescription: articleDescMatch ? articleDescMatch[1].trim() : "",
+            productName,
+            hsCode,
+            articleDescription,
             dutyRate: rate
         };
 
