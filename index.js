@@ -173,7 +173,7 @@ app.post('/api/classify', async (req, res) => {
         }
         
         const topCandidates = Array.from(uniqueCandidatesMap.values()).slice(0, 30).map(c => ({
-            code: c.code,
+            code: String(c.code).replace(/\./g, ''),  // normalize: strip dots
             description: c.desc
         }));
         
@@ -201,7 +201,7 @@ app.post('/api/classify', async (req, res) => {
         let articleDescription = "";
         let productName = "";
         
-        const hsCodeMatch = selectionText.match(/HS Code:\s*(\d{6,10})/i);
+        const hsCodeMatch = selectionText.match(/HS Code:\s*([\d.]{6,14})/i);
         const productNameMatch = selectionText.match(/product name:\s*(.*)/i);
         const articleDescMatch = selectionText.match(/article description:\s*(.*)/i);
         
@@ -209,8 +209,9 @@ app.post('/api/classify', async (req, res) => {
         articleDescription = articleDescMatch ? articleDescMatch[1].trim() : "";
 
         if (hsCodeMatch && hsCodeMatch[1]) {
-            let llmCode = hsCodeMatch[1];
-            console.log(`LLM selected code: ${llmCode}`);
+            // Strip dots — LLM may output "3305.10.00" but USITC uses "33051000"
+            let llmCode = hsCodeMatch[1].replace(/\./g, '');
+            console.log(`LLM selected code: ${hsCodeMatch[1]} → normalized: ${llmCode}`);
             
             // VALIDATION: Check if the LLM's code actually exists in our candidate list
             const validCodes = topCandidates.map(c => c.code);
