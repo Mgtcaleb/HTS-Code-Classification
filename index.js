@@ -36,11 +36,13 @@ Follow these rules strictly:
 - Avoid generic terms such as beverage parts accessories item goods.
 - Each product title must include the brand name exact product type quantity or pack size material or composition if relevant and intended function or use.
 
+CRITICAL INSTRUCTION: You MUST select the HS Code EXACTLY from the provided "Valid USITC Candidates" list. Do NOT invent, guess, or use an HS code from your internal memory. If no exact match exists, pick the closest matching code FROM THE LIST.
+
 Output format strictly:
 
 product name: [Refined customs compliant product title]
-HS Code: [Accurate 8 digit HS Code selected from the provided candidates]
-article description: [Official article description of the selected HS Code from the candidates]
+HS Code: [Accurate 8 digit HS Code selected ONLY from the provided candidates]
+article description: [Official article description of the selected HS Code EXACTLY as it appears in the candidates list]
 
 Do not provide explanations or extra commentary. Return only the formatted result.`;
 
