@@ -135,6 +135,31 @@ async function getTariffRate(hsCode) {
     }
 }
 
+async function getIndiaData(hsCode) {
+    try {
+        const response = await fetch(`https://www.icegate.gov.in/Webappl/Desc_details_itchs?cth=${hsCode}&item_desc=`);
+        if (!response.ok) return null;
+        const data = await response.json();
+        const items = data.rsAllCth || [];
+        if (items.length === 0) return null;
+
+        // Find the most specific matching code (8-digit preferred)
+        const eightDigit = items.filter(i => i.itc_code && i.itc_code.length === 8 && i.uqc);
+        const bestMatch = eightDigit.length > 0 ? eightDigit[0] : items[items.length - 1];
+
+        return {
+            itcCode: bestMatch.itc_code || '',
+            itcDesc: bestMatch.itc_desc || '',
+            importPolicy: bestMatch.itchs_policy || '',
+            indiaDuty: bestMatch.rta != null ? `${bestMatch.rta}%` : 'N/A',
+            uqc: bestMatch.uqc || ''
+        };
+    } catch (e) {
+        console.error('ICEGate fetch error:', e.message);
+        return null;
+    }
+}
+
 app.post('/api/classify', async (req, res) => {
     console.log('Received request with body:', req.body);
     try {
@@ -277,9 +302,15 @@ app.post('/api/classify', async (req, res) => {
         }
 
         // ── Step 4: Fetch rate using the VALIDATED code ──
+        let indiaData = null;
         if (hsCode) {
             console.log(`Step 4: Fetching Duty Rate for validated code: ${hsCode}...`);
-            rate = await getTariffRate(hsCode);
+            const [fetchedRate, fetchedIndiaData] = await Promise.all([
+                getTariffRate(hsCode),
+                getIndiaData(hsCode)
+            ]);
+            rate = fetchedRate;
+            indiaData = fetchedIndiaData;
             
             // If rate lookup fails, try trimming the code
             if (rate === "Unknown" && hsCode.length > 8) {
@@ -288,6 +319,7 @@ app.post('/api/classify', async (req, res) => {
                 rate = await getTariffRate(trimmed);
                 if (rate !== "Unknown") hsCode = trimmed;
             }
+            console.log('India data:', indiaData);
         }
 
         const finalResult = `product name: ${productName}\nHS Code: ${hsCode}\narticle description: ${articleDescription}\ngeneral duty rate: ${rate}`;
@@ -296,7 +328,8 @@ app.post('/api/classify', async (req, res) => {
             productName,
             hsCode,
             articleDescription,
-            dutyRate: rate
+            dutyRate: rate,
+            india: indiaData || { itcCode: 'N/A', itcDesc: 'N/A', importPolicy: 'N/A', indiaDuty: 'N/A', uqc: 'N/A' }
         };
 
         const responsePayload = { result: finalResult, data: structuredData };

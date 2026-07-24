@@ -35,6 +35,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td class="col-hscode">-</td>
                 <td class="col-desc">-</td>
                 <td class="col-rate">-</td>
+                <td class="col-itc">-</td>
+                <td class="col-itcdesc">-</td>
+                <td class="col-policy">-</td>
+                <td class="col-bcd">-</td>
                 <td class="col-status"><span class="status-badge status-pending">Pending</span></td>
             `;
             resultsBody.appendChild(tr);
@@ -71,6 +75,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     row.querySelector('.col-hscode').textContent = data.data.hsCode || 'N/A';
                     row.querySelector('.col-desc').textContent = data.data.articleDescription || 'N/A';
                     row.querySelector('.col-rate').textContent = data.data.dutyRate || 'N/A';
+                    // India data
+                    if (data.data.india) {
+                        row.querySelector('.col-itc').textContent = data.data.india.itcCode || 'N/A';
+                        row.querySelector('.col-itcdesc').textContent = data.data.india.itcDesc || 'N/A';
+                        row.querySelector('.col-policy').textContent = data.data.india.importPolicy || 'N/A';
+                        row.querySelector('.col-bcd').textContent = data.data.india.indiaDuty || 'N/A';
+                    }
                 } else {
                     // Fallback to raw result if structure is missing
                     row.querySelector('.col-desc').textContent = data.result;
@@ -110,7 +121,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            let csvContent = "Original Title,Refined Name,HS Code,Article Description,Duty Rate,Status\n";
+            let csvContent = "Original Title,Refined Name,US HS Code,Article Description,US Duty Rate,ITC-HS Code,India Description,Import Policy,India BCD,Status\n";
 
             rows.forEach(row => {
                 const cols = Array.from(row.querySelectorAll('td')).map(td => {
