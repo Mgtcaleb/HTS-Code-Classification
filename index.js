@@ -13,6 +13,7 @@ const openai = new OpenAI({
 });
 
 const USITC_TOKEN = process.env.USITC_TOKEN;
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash';
 const USITC_LOOKUP_URL = 'https://datawebws.usitc.gov/dataweb/api/v2/tariff/currentTariffLookup';
 const USITC_DETAILS_URL = 'https://datawebws.usitc.gov/dataweb/api/v2/tariff/currentTariffDetails';
 const TARIFF_YEAR = '2024';
@@ -87,7 +88,7 @@ app.post('/api/classify', async (req, res) => {
 
         console.log('Step 1: Extracting search keywords...');
         const keywordResponse = await openai.chat.completions.create({
-            model: 'google/gemini-2.5-flash',
+            model: OPENROUTER_MODEL,
             temperature: 0,
             messages: [
                 { role: 'system', content: KEYWORD_EXTRACTION_PROMPT },
@@ -124,7 +125,7 @@ app.post('/api/classify', async (req, res) => {
 
         console.log('Step 3: Selecting best HS Code...');
         const selectionResponse = await openai.chat.completions.create({
-            model: 'google/gemini-2.5-flash',
+            model: OPENROUTER_MODEL,
             temperature: 0,
             messages: [
                 { role: 'system', content: SELECTION_PROMPT },
