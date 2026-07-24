@@ -163,6 +163,26 @@ app.post('/api/classify', async (req, res) => {
             const candidates = await searchTariffs(kw);
             allCandidates = allCandidates.concat(candidates);
         }
+
+        // ── Fallback: if programmatic keywords returned 0 results, use a cheap LLM call ──
+        if (allCandidates.length === 0) {
+            console.log('No USITC results from keywords. Falling back to LLM for HS code guess...');
+            const fallbackResponse = await openai.chat.completions.create({
+                model: OPENROUTER_MODEL,
+                temperature: 0,
+                max_tokens: 30,
+                messages: [
+                    { role: 'system', content: 'You are a customs classification engine. Given the product title, output the single most likely 4-digit HS heading number. Respond with ONLY the 4-digit number, nothing else.' },
+                    { role: 'user', content: productTitle }
+                ]
+            });
+            const fallbackCode = fallbackResponse.choices[0].message.content.trim().replace(/[^0-9]/g, '').substring(0, 4);
+            console.log(`LLM fallback HS heading: ${fallbackCode}`);
+            if (fallbackCode.length === 4) {
+                const fallbackCandidates = await searchTariffs(fallbackCode);
+                allCandidates = allCandidates.concat(fallbackCandidates);
+            }
+        }
         
         // Remove duplicates and limit to top 30
         const uniqueCandidatesMap = new Map();

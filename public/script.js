@@ -57,9 +57,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     body: JSON.stringify({ productTitle: items[i] })
                 });
 
-                if (!response.ok) throw new Error('API Error');
-                
                 const data = await response.json();
+
+                if (!response.ok) {
+                    // Show the exact error from the server
+                    const errMsg = data.details || data.error || `Server error ${response.status}`;
+                    throw new Error(errMsg);
+                }
                 
                 // Expecting backend to return parsed data alongside raw result string
                 if (data.data) {
