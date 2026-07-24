@@ -1,4 +1,6 @@
 require('dotenv').config();
+// Ignore SSL errors for ICEGate API since they often have incomplete certificate chains
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 const OpenAI = require('openai');
 const express = require('express');
 
@@ -143,9 +145,21 @@ async function getIndiaData(hsCode) {
         const items = data.rsAllCth || [];
         if (items.length === 0) return null;
 
-        // Find the most specific matching code (8-digit preferred)
-        const eightDigit = items.filter(i => i.itc_code && i.itc_code.length === 8 && i.uqc);
-        const bestMatch = eightDigit.length > 0 ? eightDigit[0] : items[items.length - 1];
+        // Find the most specific matching code
+        // 1. Exact 8-digit match
+        let bestMatch = items.find(i => i.itc_code === hsCode);
+        
+        // 2. 6-digit prefix match (if US code ends in different sub-digits than India)
+        if (!bestMatch && hsCode.length >= 6) {
+            const prefix6 = hsCode.substring(0, 6);
+            bestMatch = items.find(i => i.itc_code && i.itc_code.startsWith(prefix6) && i.itc_code.length === 8 && i.uqc);
+        }
+
+        // 3. Fallback to any 8-digit code
+        if (!bestMatch) {
+            const eightDigit = items.filter(i => i.itc_code && i.itc_code.length === 8 && i.uqc);
+            bestMatch = eightDigit.length > 0 ? eightDigit[0] : items[items.length - 1];
+        }
 
         return {
             itcCode: bestMatch.itc_code || '',
