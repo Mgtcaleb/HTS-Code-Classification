@@ -171,6 +171,9 @@ async function getIndiaData(hsCode) {
     } catch (e) {
         console.error('ICEGate fetch error:', e.message);
         return null;
+    }
+}
+
 // ── Service Health Checker ──
 const serviceHealth = {
     openRouter: true,
