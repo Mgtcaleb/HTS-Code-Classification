@@ -171,11 +171,59 @@ async function getIndiaData(hsCode) {
     } catch (e) {
         console.error('ICEGate fetch error:', e.message);
         return null;
-    }
+// ── Service Health Checker ──
+const serviceHealth = {
+    openRouter: true,
+    usitc: true,
+    icegate: true,
+    lastChecked: Date.now()
+};
+
+async function checkServiceHealth() {
+    console.log('Running background health check on external APIs...');
+    
+    // 1. OpenRouter (Check Auth Key endpoint)
+    try {
+        const orRes = await fetch('https://openrouter.ai/api/v1/auth/key', {
+            headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` }
+        });
+        serviceHealth.openRouter = orRes.ok;
+    } catch { serviceHealth.openRouter = false; }
+
+    // 2. USITC (Lookup endpoint with a dummy query)
+    try {
+        const usitcRes = await fetch(USITC_LOOKUP_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${USITC_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ searchTerm: '3305', tariffYear: TARIFF_YEAR })
+        });
+        serviceHealth.usitc = usitcRes.ok;
+    } catch { serviceHealth.usitc = false; }
+
+    // 3. ICEGate (Lookup endpoint with a dummy query)
+    try {
+        const iceRes = await fetch('https://www.icegate.gov.in/Webappl/Desc_details_itchs?cth=33051000&item_desc=');
+        serviceHealth.icegate = iceRes.ok;
+    } catch { serviceHealth.icegate = false; }
+    
+    serviceHealth.lastChecked = Date.now();
+    console.log(`Health check complete: OR=${serviceHealth.openRouter} USITC=${serviceHealth.usitc} ICE=${serviceHealth.icegate}`);
 }
 
+// Run health checks every 2 minutes to prevent rate limiting
+setInterval(checkServiceHealth, 120000);
+checkServiceHealth(); // run immediately on startup
+
 app.get('/api/ping', (req, res) => {
-    res.send('pong');
+    res.json({
+        server: true,
+        openRouter: serviceHealth.openRouter,
+        usitc: serviceHealth.usitc,
+        icegate: serviceHealth.icegate
+    });
 });
 
 // ── Keep-Alive Worker (Anti-Sleep) ──

@@ -272,15 +272,21 @@ td {
     margin-bottom: 10px;
 }
 
+.system-status {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
 .api-status {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
-    border-radius: 20px;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 12px;
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.1);
-    font-size: 0.85rem;
+    font-size: 0.75rem;
     font-weight: 500;
 }
 

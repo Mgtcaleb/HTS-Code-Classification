@@ -16,9 +16,19 @@
         <header>
             <div class="header-top">
                 <h1>Global Customs Classification</h1>
-                <div id="api-status" class="api-status checking">
-                    <span class="status-dot"></span>
-                    <span class="status-text">Checking API Status...</span>
+                <div class="system-status">
+                    <div id="status-server" class="api-status checking" title="Render Server">
+                        <span class="status-dot"></span> <span class="status-text">Server</span>
+                    </div>
+                    <div id="status-or" class="api-status checking" title="OpenRouter LLM">
+                        <span class="status-dot"></span> <span class="status-text">LLM</span>
+                    </div>
+                    <div id="status-usitc" class="api-status checking" title="USITC Data">
+                        <span class="status-dot"></span> <span class="status-text">USITC</span>
+                    </div>
+                    <div id="status-icegate" class="api-status checking" title="ICEGate India">
+                        <span class="status-dot"></span> <span class="status-text">ICEGate</span>
+                    </div>
                 </div>
             </div>
             <p>Paste multiple product titles (one per line) below to dynamically assign accurate 8-digit HS Codes via USITC.</p>

@@ -144,27 +144,36 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ── Live API Status Checker ──
+function updateIndicator(id, isOnline) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = isOnline ? 'api-status online' : 'api-status offline';
+}
+
 function checkApiStatus() {
-    const statusContainer = document.getElementById('api-status');
-    const statusText = statusContainer.querySelector('.status-text');
-    
-    // Set checking state
-    statusContainer.className = 'api-status checking';
-    statusText.textContent = 'Checking API Status...';
+    // Reset all to checking
+    ['status-server', 'status-or', 'status-usitc', 'status-icegate'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.className = 'api-status checking';
+    });
 
     fetch('/api/ping')
         .then(response => {
-            if (response.ok) {
-                statusContainer.className = 'api-status online';
-                statusText.textContent = 'API Online';
-            } else {
-                throw new Error('API returned non-ok status');
-            }
+            if (!response.ok) throw new Error('API returned non-ok status');
+            return response.json();
+        })
+        .then(data => {
+            updateIndicator('status-server', data.server);
+            updateIndicator('status-or', data.openRouter);
+            updateIndicator('status-usitc', data.usitc);
+            updateIndicator('status-icegate', data.icegate);
         })
         .catch(error => {
-            statusContainer.className = 'api-status offline';
-            statusText.textContent = 'API Offline';
             console.error('API Status Check Failed:', error);
+            updateIndicator('status-server', false);
+            updateIndicator('status-or', false);
+            updateIndicator('status-usitc', false);
+            updateIndicator('status-icegate', false);
         });
 }
 
