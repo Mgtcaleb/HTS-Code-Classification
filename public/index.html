@@ -70,6 +70,7 @@
                                 <th>Import Policy</th>
                                 <th>India BCD</th>
                                 <th>Status</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody id="results-body">
@@ -79,6 +80,27 @@
                 </div>
             </div>
         </main>
+    </div>
+
+    <!-- Teach Modal -->
+    <div id="teach-modal" class="modal hidden">
+        <div class="modal-content glass-panel">
+            <span class="close-btn" id="close-modal">&times;</span>
+            <h2>Teach the AI</h2>
+            <p>Manually correct the HS code for this product. The system will remember this for future searches.</p>
+            <form id="teach-form">
+                <input type="hidden" id="teach-original-title">
+                <div class="form-group">
+                    <label>Product Title:</label>
+                    <div id="teach-display-title" class="static-text"></div>
+                </div>
+                <div class="form-group">
+                    <label for="teach-hs-code">Correct 8-digit HS Code:</label>
+                    <input type="text" id="teach-hs-code" placeholder="e.g. 33051000" required pattern="[\d\.]{4,12}">
+                </div>
+                <button type="submit" id="teach-submit-btn">Save Correction</button>
+            </form>
+        </div>
     </div>
 
     <script src="script.js"></script>

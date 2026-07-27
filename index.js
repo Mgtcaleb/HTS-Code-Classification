@@ -3,6 +3,18 @@ require('dotenv').config();
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 const OpenAI = require('openai');
 const express = require('express');
+const { createClient } = require('@supabase/supabase-js');
+
+// Initialize Supabase Client
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_PUBLISHABLE_KEY; 
+let supabase = null;
+if (supabaseUrl && supabaseKey) {
+    supabase = createClient(supabaseUrl, supabaseKey);
+    console.log('Supabase client initialized.');
+} else {
+    console.warn('Supabase credentials missing. Teaching feature disabled.');
+}
 
 const app = express();
 app.use(express.json());
@@ -262,8 +274,37 @@ app.post('/api/classify', async (req, res) => {
             console.log('Cache HIT — returning cached result (0 tokens used).');
             return res.json(resultCache.get(cacheKey));
         }
+        // ── Supabase Manual Override Check ──
+        let overrideHsCode = null;
+        if (supabase) {
+            const { data, error } = await supabase
+                .from('manual_overrides')
+                .select('correct_hs_code')
+                .eq('product_title', cacheKey)
+                .single();
+            
+            if (data && data.correct_hs_code) {
+                console.log(`Supabase Override HIT! Skipping LLM. Using code: ${data.correct_hs_code}`);
+                overrideHsCode = data.correct_hs_code;
+            }
+        }
 
-        // ── Step 1: Extract keywords programmatically (FREE — no LLM call) ──
+        let hsCode = "";
+        let articleDescription = "";
+        let productName = productTitle;
+        let rate = "Unknown";
+
+        if (overrideHsCode) {
+            // We have a manual override!
+            hsCode = overrideHsCode;
+            
+            // Search USITC for the overridden code just to get the official description
+            const overrideCandidates = await searchTariffs(hsCode);
+            const match = overrideCandidates.find(c => c.code === hsCode || String(c.code).replace(/\./g, '') === hsCode);
+            articleDescription = match ? match.desc : "Manual Override - Official Description Not Found";
+            
+        } else {
+            // ── Step 1: Extract keywords programmatically (FREE — no LLM call) ──
         console.log('Step 1: Extracting keywords (programmatic — no LLM)...');
         const keywords = extractKeywords(productTitle);
         console.log(`Extracted Keywords: ${keywords.join(', ')}`);
@@ -387,6 +428,7 @@ app.post('/api/classify', async (req, res) => {
                 console.log(`Fallback to first candidate: ${hsCode}`);
             }
         }
+        } // End of else block (if no override)
 
         // ── Step 4: Fetch rate using the VALIDATED code ──
         let indiaData = null;
@@ -429,6 +471,43 @@ app.post('/api/classify', async (req, res) => {
     } catch (error) {
         console.error('Error classifying product:', error);
         res.status(500).json({ error: 'Failed to process request', details: error.message });
+    }
+});
+app.post('/api/teach', async (req, res) => {
+    try {
+        const { productTitle, correctHsCode } = req.body;
+        if (!productTitle || !correctHsCode) {
+            return res.status(400).json({ error: 'Missing productTitle or correctHsCode' });
+        }
+
+        const cacheKey = productTitle.trim().toLowerCase();
+        
+        // Remove from in-memory cache so next run does fresh fetch
+        resultCache.delete(cacheKey);
+
+        if (!supabase) {
+            return res.status(500).json({ error: 'Supabase is not configured on the server.' });
+        }
+
+        // Save to Supabase
+        const { error } = await supabase
+            .from('manual_overrides')
+            .upsert({ 
+                product_title: cacheKey, 
+                correct_hs_code: correctHsCode,
+                updated_at: new Date().toISOString()
+            }, { onConflict: 'product_title' });
+
+        if (error) {
+            console.error('Supabase insert error:', error);
+            return res.status(500).json({ error: 'Failed to save to database: ' + error.message });
+        }
+
+        console.log(`Learned new override: "${cacheKey}" -> ${correctHsCode}`);
+        res.json({ success: true, message: 'Override saved successfully!' });
+    } catch (e) {
+        console.error('Teach error:', e);
+        res.status(500).json({ error: e.message });
     }
 });
 

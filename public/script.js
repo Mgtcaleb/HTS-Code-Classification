@@ -40,6 +40,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td class="col-policy">-</td>
                 <td class="col-bcd">-</td>
                 <td class="col-status"><span class="status-badge status-pending">Pending</span></td>
+                <td class="col-actions"><button type="button" class="teach-btn hidden" data-title="${escapeHTML(item)}">✏️ Teach</button></td>
             `;
             resultsBody.appendChild(tr);
             rows.push(tr);
@@ -88,9 +89,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 statusCell.innerHTML = '<span class="status-badge status-success">Done</span>';
+                const teachBtn = row.querySelector('.teach-btn');
+                if (teachBtn) teachBtn.classList.remove('hidden');
+
             } catch (err) {
                 statusCell.innerHTML = '<span class="status-badge status-error">Error</span>';
                 row.querySelector('.col-desc').textContent = err.message;
+                const teachBtn = row.querySelector('.teach-btn');
+                if (teachBtn) teachBtn.classList.remove('hidden');
             }
         }
 
@@ -180,3 +186,66 @@ function checkApiStatus() {
 // Check immediately on load, then every 30 seconds
 checkApiStatus();
 setInterval(checkApiStatus, 30000);
+
+// ── Teach Modal Logic ──
+const teachModal = document.getElementById('teach-modal');
+const closeModal = document.getElementById('close-modal');
+const teachForm = document.getElementById('teach-form');
+const teachDisplayTitle = document.getElementById('teach-display-title');
+const teachOriginalTitle = document.getElementById('teach-original-title');
+const teachHsCode = document.getElementById('teach-hs-code');
+const teachSubmitBtn = document.getElementById('teach-submit-btn');
+
+document.addEventListener('click', (e) => {
+    if (e.target.classList.contains('teach-btn')) {
+        const title = e.target.getAttribute('data-title');
+        teachOriginalTitle.value = title;
+        teachDisplayTitle.textContent = title;
+        teachHsCode.value = '';
+        teachModal.classList.remove('hidden');
+        teachHsCode.focus();
+    }
+});
+
+closeModal.addEventListener('click', () => {
+    teachModal.classList.add('hidden');
+});
+
+teachModal.addEventListener('click', (e) => {
+    if (e.target === teachModal) {
+        teachModal.classList.add('hidden');
+    }
+});
+
+teachForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const productTitle = teachOriginalTitle.value;
+    const correctHsCode = teachHsCode.value.replace(/\./g, '');
+
+    teachSubmitBtn.textContent = 'Saving...';
+    teachSubmitBtn.disabled = true;
+
+    try {
+        const response = await fetch('/api/teach', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ productTitle, correctHsCode })
+        });
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to save correction');
+        }
+
+        teachModal.classList.add('hidden');
+        alert('Correction saved! Please re-run the classification to see the updated results.');
+        
+    } catch (err) {
+        alert('Error: ' + err.message);
+    } finally {
+        teachSubmitBtn.textContent = 'Save Correction';
+        teachSubmitBtn.disabled = false;
+    }
+});
