@@ -369,10 +369,7 @@ app.post('/api/classify', async (req, res) => {
         console.log('LLM raw output:', selectionText);
 
         // Extract the HS code the LLM chose
-        let hsCode = "";
-        let rate = "N/A";
-        let articleDescription = "";
-        let productName = "";
+        // (Variables already declared in outer scope)
         
         const hsCodeMatch = selectionText.match(/HS Code:\s*([\d.]{6,14})/i);
         const productNameMatch = selectionText.match(/product name:\s*(.*)/i);
