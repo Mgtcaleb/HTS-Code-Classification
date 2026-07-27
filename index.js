@@ -174,8 +174,30 @@ async function getIndiaData(hsCode) {
     }
 }
 
+app.get('/api/ping', (req, res) => {
+    res.send('pong');
+});
+
+// ── Keep-Alive Worker (Anti-Sleep) ──
+// Render free tier sleeps after 15 mins. This pings every 14 mins.
+let keepAliveTimer;
+function resetKeepAlive() {
+    clearTimeout(keepAliveTimer);
+    // 14 minutes = 14 * 60 * 1000 = 840000 ms
+    keepAliveTimer = setTimeout(() => {
+        console.log('Keep-alive worker pinging to prevent sleep...');
+        const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
+        fetch(`${url}/api/ping`).catch(() => {});
+        resetKeepAlive(); // Schedule the next one
+    }, 840000);
+}
+
 app.post('/api/classify', async (req, res) => {
     console.log('Received request with body:', req.body);
+    
+    // User is active, reset the worker timer so it doesn't run during actual usage
+    resetKeepAlive();
+    
     try {
         const { productTitle } = req.body;
         
@@ -363,4 +385,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`HS Code Classification API running on port ${PORT}`);
     console.log(`Send a POST request to http://localhost:${PORT}/api/classify`);
+    
+    // Start the keep-alive worker initially
+    resetKeepAlive();
 });
