@@ -464,6 +464,24 @@ app.post('/api/classify', async (req, res) => {
         resultCache.set(cacheKey, responsePayload);
         console.log('Result cached for future lookups.');
 
+        // ── Log to Supabase Search History (Fire and Forget) ──
+        if (supabase) {
+            supabase.from('search_history').insert({
+                original_title: productTitle.trim(),
+                refined_name: structuredData.productName,
+                us_hs_code: structuredData.hsCode,
+                us_description: structuredData.articleDescription,
+                us_duty_rate: structuredData.dutyRate,
+                india_hs_code: structuredData.india.itcCode,
+                india_description: structuredData.india.itcDesc,
+                india_duty_rate: structuredData.india.indiaDuty,
+                import_policy: structuredData.india.importPolicy
+            }).then(({ error }) => {
+                if (error) console.error('Failed to log search history to Supabase:', error);
+                else console.log(`Logged search history for: "${productTitle}"`);
+            });
+        }
+
         res.json(responsePayload);
     } catch (error) {
         console.error('Error classifying product:', error);
