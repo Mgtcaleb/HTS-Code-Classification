@@ -263,3 +263,60 @@ td {
     background-color: rgba(239, 68, 68, 0.2);
     color: #fecaca;
 }
+
+/* API Status Indicator */
+.header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.api-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #a0aec0;
+    box-shadow: 0 0 8px rgba(160, 174, 192, 0.5);
+}
+
+.api-status.checking .status-dot {
+    background: #ecc94b;
+    box-shadow: 0 0 8px rgba(236, 201, 75, 0.5);
+    animation: pulse-checking 1.5s infinite;
+}
+
+.api-status.online .status-dot {
+    background: #48bb78;
+    box-shadow: 0 0 8px rgba(72, 187, 120, 0.5);
+}
+
+.api-status.offline .status-dot {
+    background: #f56565;
+    box-shadow: 0 0 8px rgba(245, 101, 101, 0.5);
+}
+
+@keyframes pulse-checking {
+    0% { opacity: 1; }
+    50% { opacity: 0.5; }
+    100% { opacity: 1; }
+}
+
+@media (max-width: 768px) {
+    .header-top {
+        flex-direction: column;
+        gap: 15px;
+    }
+}

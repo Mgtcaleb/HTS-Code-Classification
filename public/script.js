@@ -142,3 +142,32 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 });
+
+// ── Live API Status Checker ──
+function checkApiStatus() {
+    const statusContainer = document.getElementById('api-status');
+    const statusText = statusContainer.querySelector('.status-text');
+    
+    // Set checking state
+    statusContainer.className = 'api-status checking';
+    statusText.textContent = 'Checking API Status...';
+
+    fetch('/api/ping')
+        .then(response => {
+            if (response.ok) {
+                statusContainer.className = 'api-status online';
+                statusText.textContent = 'API Online';
+            } else {
+                throw new Error('API returned non-ok status');
+            }
+        })
+        .catch(error => {
+            statusContainer.className = 'api-status offline';
+            statusText.textContent = 'API Offline';
+            console.error('API Status Check Failed:', error);
+        });
+}
+
+// Check immediately on load, then every 30 seconds
+checkApiStatus();
+setInterval(checkApiStatus, 30000);
