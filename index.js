@@ -27,10 +27,95 @@ const openai = new OpenAI({
 });
 
 const USITC_TOKEN = process.env.USITC_TOKEN;
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'antdigital/lingdt-decision-fast-1.0:free';
+const OPENROUTER_DECISIONS_URL = 'https://openrouter.ai/api/alpha/decisions';
 const USITC_LOOKUP_URL = 'https://datawebws.usitc.gov/dataweb/api/v2/tariff/currentTariffLookup';
 const USITC_DETAILS_URL = 'https://datawebws.usitc.gov/dataweb/api/v2/tariff/currentTariffDetails';
 const TARIFF_YEAR = '2024';
+
+/**
+ * Detect if a model is an OpenRouter decisions model (which requires /api/alpha/decisions)
+ */
+function isDecisionModel(model) {
+    if (!model) return false;
+    const m = model.toLowerCase();
+    return m.includes('decision') || m.startsWith('antdigital/lingdt') || m.startsWith('typesafe/jev');
+}
+
+/**
+ * Clean product title for customs compliance (remove promotional words, emojis, special characters)
+ */
+function cleanCustomsTitle(title) {
+    if (!title) return '';
+    let cleaned = title.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F900}-\u{1F9FF}]/gu, '');
+    cleaned = cleaned.replace(/[!|()[\]{}*~^,]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return cleaned || title.trim();
+}
+
+/**
+ * Call OpenRouter /api/alpha/decisions endpoint for decision models
+ */
+async function selectWithDecisionsApi(model, productTitle, topCandidates) {
+    console.log(`Using OpenRouter Decisions API (${OPENROUTER_DECISIONS_URL}) with model: ${model}...`);
+    if (!topCandidates || topCandidates.length === 0) {
+        return {
+            hsCode: '',
+            articleDescription: '',
+            productName: cleanCustomsTitle(productTitle)
+        };
+    }
+
+    const criteria = {};
+    for (const candidate of topCandidates) {
+        const key = String(candidate.code).replace(/[^a-zA-Z0-9_]/g, '');
+        if (key) {
+            criteria[key] = (candidate.description || 'Candidate code ' + key).substring(0, 300);
+        }
+    }
+
+    const response = await fetch(OPENROUTER_DECISIONS_URL, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            model: model,
+            state: {
+                product_title: productTitle
+            },
+            questions: {
+                hs_code: {
+                    type: 'choice',
+                    instructions: 'Select the most accurate Harmonized System (HS) code classification for this product from the available choices.',
+                    criteria: criteria
+                }
+            }
+        })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+        const errorMsg = data.error?.message || `Decisions API returned status ${response.status}`;
+        throw new Error(errorMsg);
+    }
+
+    const chosenCode = data.answers?.hs_code?.choice;
+    const confidence = data.answers?.hs_code?.confidence;
+    console.log(`Decisions API selected code: ${chosenCode} (confidence: ${confidence})`);
+
+    let matched = topCandidates.find(c => String(c.code).replace(/[^a-zA-Z0-9_]/g, '') === chosenCode);
+    if (!matched && topCandidates.length > 0) {
+        console.log(`Chosen code "${chosenCode}" not directly in candidate list. Snapping to first candidate.`);
+        matched = topCandidates[0];
+    }
+
+    return {
+        hsCode: matched ? matched.code : (chosenCode || ''),
+        articleDescription: matched ? matched.description : '',
+        productName: cleanCustomsTitle(productTitle)
+    };
+}
 
 // ── In-memory cache: same product title → same result, zero tokens ──
 const resultCache = new Map();
@@ -117,34 +202,43 @@ article description: [Official article description copied EXACTLY from the candi
 Do not provide explanations or extra commentary. Return only the formatted result.`;
 
 async function searchTariffs(keyword) {
-    const response = await fetch(USITC_LOOKUP_URL, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${USITC_TOKEN}`,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ searchTerm: keyword, tariffYear: TARIFF_YEAR })
-    });
-    if (!response.ok) return [];
-    const data = await response.json();
-    return data.list || [];
+    try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (USITC_TOKEN) {
+            headers['Authorization'] = `Bearer ${USITC_TOKEN}`;
+        }
+        const response = await fetch(USITC_LOOKUP_URL, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ searchTerm: keyword, tariffYear: TARIFF_YEAR })
+        });
+        if (!response.ok) return [];
+        const data = await response.json();
+        return data.list || [];
+    } catch (e) {
+        console.error('USITC searchTariffs error:', e.message);
+        return [];
+    }
 }
 
 async function getTariffRate(hsCode) {
-    const response = await fetch(`${USITC_DETAILS_URL}?year=${TARIFF_YEAR}&hts8=${hsCode}`, {
-        method: 'GET',
-        headers: {
-            'Authorization': `Bearer ${USITC_TOKEN}`
-        }
-    });
-    if (!response.ok) return "Unknown";
-    const data = await response.json();
     try {
-        const tariffTreatment = data.sections.find(s => s.id === 'tariff_treatment');
-        const mfn = tariffTreatment.children.find(c => c.id === 'mfn');
-        const mfnText = mfn.children.find(c => c.id === 'mfn_text');
-        return mfnText.value;
+        const headers = {};
+        if (USITC_TOKEN) {
+            headers['Authorization'] = `Bearer ${USITC_TOKEN}`;
+        }
+        const response = await fetch(`${USITC_DETAILS_URL}?year=${TARIFF_YEAR}&hts8=${hsCode}`, {
+            method: 'GET',
+            headers
+        });
+        if (!response.ok) return "Unknown";
+        const data = await response.json();
+        const tariffTreatment = data.sections?.find(s => s.id === 'tariff_treatment');
+        const mfn = tariffTreatment?.children?.find(c => c.id === 'mfn');
+        const mfnText = mfn?.children?.find(c => c.id === 'mfn_text');
+        return mfnText?.value || "Unknown";
     } catch (e) {
+        console.error('USITC getTariffRate error:', e.message);
         return "Unknown";
     }
 }
@@ -207,12 +301,13 @@ async function checkServiceHealth() {
 
     // 2. USITC (Lookup endpoint with a dummy query)
     try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (USITC_TOKEN) {
+            headers['Authorization'] = `Bearer ${USITC_TOKEN}`;
+        }
         const usitcRes = await fetch(USITC_LOOKUP_URL, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${USITC_TOKEN}`,
-                'Content-Type': 'application/json'
-            },
+            headers,
             body: JSON.stringify({ searchTerm: '3305', tariffYear: TARIFF_YEAR })
         });
         serviceHealth.usitc = usitcRes.ok;
@@ -320,20 +415,37 @@ app.post('/api/classify', async (req, res) => {
         // ── Fallback: if programmatic keywords returned 0 results, use a cheap LLM call ──
         if (allCandidates.length === 0) {
             console.log('No USITC results from keywords. Falling back to LLM for HS code guess...');
-            const fallbackResponse = await openai.chat.completions.create({
-                model: OPENROUTER_MODEL,
-                temperature: 0,
-                max_tokens: 30,
-                messages: [
-                    { role: 'system', content: 'You are a customs classification engine. Given the product title, output the single most likely 4-digit HS heading number. Respond with ONLY the 4-digit number, nothing else.' },
-                    { role: 'user', content: productTitle }
-                ]
-            });
-            const fallbackCode = fallbackResponse.choices[0].message.content.trim().replace(/[^0-9]/g, '').substring(0, 4);
-            console.log(`LLM fallback HS heading: ${fallbackCode}`);
-            if (fallbackCode.length === 4) {
-                const fallbackCandidates = await searchTariffs(fallbackCode);
-                allCandidates = allCandidates.concat(fallbackCandidates);
+            try {
+                const chatModel = isDecisionModel(OPENROUTER_MODEL)
+                    ? (process.env.OPENROUTER_CHAT_FALLBACK_MODEL || 'openrouter/free')
+                    : OPENROUTER_MODEL;
+
+                const fallbackResponse = await openai.chat.completions.create({
+                    model: chatModel,
+                    temperature: 0,
+                    max_tokens: 150,
+                    messages: [
+                        { role: 'system', content: 'You are a customs classification engine. Given the product title, output the single most likely 4-digit HS heading number. Respond with ONLY the 4-digit number, nothing else.' },
+                        { role: 'user', content: productTitle }
+                    ]
+                });
+                const rawContent = fallbackResponse.choices[0]?.message?.content || fallbackResponse.choices[0]?.message?.reasoning || '';
+                const fallbackCode = rawContent.trim().replace(/[^0-9]/g, '').substring(0, 4);
+                console.log(`LLM fallback HS heading: ${fallbackCode}`);
+                if (fallbackCode.length === 4) {
+                    const fallbackCandidates = await searchTariffs(fallbackCode);
+                    allCandidates = allCandidates.concat(fallbackCandidates);
+                }
+            } catch (fallbackErr) {
+                console.warn('LLM fallback guess failed, trying title word search:', fallbackErr.message);
+                const words = productTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2 && !STOPWORDS.has(w));
+                for (const word of words.slice(0, 3)) {
+                    const fallbackCandidates = await searchTariffs(word);
+                    if (fallbackCandidates.length > 0) {
+                        allCandidates = allCandidates.concat(fallbackCandidates);
+                        break;
+                    }
+                }
             }
         }
         
@@ -350,79 +462,97 @@ app.post('/api/classify', async (req, res) => {
             description: c.desc
         }));
         
-        console.log(`Found ${allCandidates.length} raw candidates. Sending top ${topCandidates.length} unique candidates to LLM.`);
+        console.log(`Found ${allCandidates.length} raw candidates. Sending top ${topCandidates.length} unique candidates to model.`);
 
         // Build a numbered list so the LLM can reference easily
         const candidateListText = topCandidates.map((c, i) => `${i+1}. Code: ${c.code} | Description: ${c.description}`).join('\n');
 
-        // ── Step 3: Single LLM call to pick best match + rewrite title ──
-        console.log('Step 3: Selecting best HS Code (single LLM call)...');
-        const selectionResponse = await openai.chat.completions.create({
-            model: OPENROUTER_MODEL,
-            temperature: 0,
-            messages: [
-                { role: 'system', content: SELECTION_PROMPT },
-                { role: 'user', content: `Original Product Title: ${productTitle}\n\nValid USITC Candidates (you MUST pick from this list):\n${candidateListText}` }
-            ]
-        });
-        const selectionText = selectionResponse.choices[0].message.content.trim();
-        console.log('LLM raw output:', selectionText);
-
-        // Extract the HS code the LLM chose
-        // (Variables already declared in outer scope)
-        
-        const hsCodeMatch = selectionText.match(/HS Code:\s*([\d.]{6,14})/i);
-        const productNameMatch = selectionText.match(/product name:\s*(.*)/i);
-        const articleDescMatch = selectionText.match(/article description:\s*(.*)/i);
-        
-        productName = productNameMatch ? productNameMatch[1].trim() : "";
-        articleDescription = articleDescMatch ? articleDescMatch[1].trim() : "";
-
-        if (hsCodeMatch && hsCodeMatch[1]) {
-            // Strip dots — LLM may output "3305.10.00" but USITC uses "33051000"
-            let llmCode = hsCodeMatch[1].replace(/\./g, '');
-            console.log(`LLM selected code: ${hsCodeMatch[1]} → normalized: ${llmCode}`);
-            
-            // VALIDATION: Check if the LLM's code actually exists in our candidate list
-            const validCodes = topCandidates.map(c => c.code);
-            
-            if (validCodes.includes(llmCode)) {
-                hsCode = llmCode;
-                console.log(`Code ${hsCode} is valid (found in candidate list).`);
-            } else {
-                // LLM hallucinated a code. Find the closest match from the real list.
-                console.log(`Code ${llmCode} NOT found in candidate list. Finding closest match...`);
-                
-                let bestMatch = null;
-                let bestMatchLength = 0;
-                for (const candidate of topCandidates) {
-                    let matchLen = 0;
-                    for (let i = 0; i < Math.min(llmCode.length, candidate.code.length); i++) {
-                        if (llmCode[i] === candidate.code[i]) matchLen++;
-                        else break;
-                    }
-                    if (matchLen > bestMatchLength) {
-                        bestMatchLength = matchLen;
-                        bestMatch = candidate;
-                    }
-                }
-                
-                if (bestMatch) {
-                    hsCode = bestMatch.code;
-                    articleDescription = bestMatch.description;
-                    console.log(`Snapped to closest valid code: ${hsCode} (${articleDescription})`);
-                } else {
-                    hsCode = topCandidates[0].code;
-                    articleDescription = topCandidates[0].description;
-                    console.log(`Fallback to first candidate: ${hsCode}`);
-                }
-            }
+        // ── Step 3: Select best match using Decisions API or Chat Completions ──
+        if (isDecisionModel(OPENROUTER_MODEL)) {
+            console.log(`Step 3: Selecting best HS Code using Decisions API (${OPENROUTER_MODEL})...`);
+            const decisionResult = await selectWithDecisionsApi(OPENROUTER_MODEL, productTitle, topCandidates);
+            hsCode = decisionResult.hsCode;
+            articleDescription = decisionResult.articleDescription;
+            productName = decisionResult.productName;
         } else {
-            console.log('Could not parse HS Code from LLM output.');
-            if (topCandidates.length > 0) {
-                hsCode = topCandidates[0].code;
-                articleDescription = topCandidates[0].description;
-                console.log(`Fallback to first candidate: ${hsCode}`);
+            console.log('Step 3: Selecting best HS Code (single LLM chat completion call)...');
+            try {
+                const selectionResponse = await openai.chat.completions.create({
+                    model: OPENROUTER_MODEL,
+                    temperature: 0,
+                    messages: [
+                        { role: 'system', content: SELECTION_PROMPT },
+                        { role: 'user', content: `Original Product Title: ${productTitle}\n\nValid USITC Candidates (you MUST pick from this list):\n${candidateListText}` }
+                    ]
+                });
+                const selectionText = selectionResponse.choices[0].message.content.trim();
+                console.log('LLM raw output:', selectionText);
+
+                const hsCodeMatch = selectionText.match(/HS Code:\s*([\d.]{6,14})/i);
+                const productNameMatch = selectionText.match(/product name:\s*(.*)/i);
+                const articleDescMatch = selectionText.match(/article description:\s*(.*)/i);
+                
+                productName = productNameMatch ? productNameMatch[1].trim() : cleanCustomsTitle(productTitle);
+                articleDescription = articleDescMatch ? articleDescMatch[1].trim() : "";
+
+                if (hsCodeMatch && hsCodeMatch[1]) {
+                    // Strip dots — LLM may output "3305.10.00" but USITC uses "33051000"
+                    let llmCode = hsCodeMatch[1].replace(/\./g, '');
+                    console.log(`LLM selected code: ${hsCodeMatch[1]} → normalized: ${llmCode}`);
+                    
+                    // VALIDATION: Check if the LLM's code actually exists in our candidate list
+                    const validCodes = topCandidates.map(c => c.code);
+                    
+                    if (validCodes.includes(llmCode)) {
+                        hsCode = llmCode;
+                        console.log(`Code ${hsCode} is valid (found in candidate list).`);
+                    } else {
+                        // LLM hallucinated a code. Find the closest match from the real list.
+                        console.log(`Code ${llmCode} NOT found in candidate list. Finding closest match...`);
+                        
+                        let bestMatch = null;
+                        let bestMatchLength = 0;
+                        for (const candidate of topCandidates) {
+                            let matchLen = 0;
+                            for (let i = 0; i < Math.min(llmCode.length, candidate.code.length); i++) {
+                                if (llmCode[i] === candidate.code[i]) matchLen++;
+                                else break;
+                            }
+                            if (matchLen > bestMatchLength) {
+                                bestMatchLength = matchLen;
+                                bestMatch = candidate;
+                            }
+                        }
+                        
+                        if (bestMatch) {
+                            hsCode = bestMatch.code;
+                            articleDescription = bestMatch.description;
+                            console.log(`Snapped to closest valid code: ${hsCode} (${articleDescription})`);
+                        } else if (topCandidates.length > 0) {
+                            hsCode = topCandidates[0].code;
+                            articleDescription = topCandidates[0].description;
+                            console.log(`Fallback to first candidate: ${hsCode}`);
+                        }
+                    }
+                } else {
+                    console.log('Could not parse HS Code from LLM output.');
+                    if (topCandidates.length > 0) {
+                        hsCode = topCandidates[0].code;
+                        articleDescription = topCandidates[0].description;
+                        console.log(`Fallback to first candidate: ${hsCode}`);
+                    }
+                }
+            } catch (llmErr) {
+                // If OpenRouter returns the 400 decisions model error, automatically handle it via Decisions API
+                if (llmErr.message && (llmErr.message.includes('decisions model') || llmErr.message.includes('/api/alpha/decisions'))) {
+                    console.warn('Caught decisions model error from chat/completions endpoint, switching to Decisions API...');
+                    const decisionResult = await selectWithDecisionsApi(OPENROUTER_MODEL, productTitle, topCandidates);
+                    hsCode = decisionResult.hsCode;
+                    articleDescription = decisionResult.articleDescription;
+                    productName = decisionResult.productName;
+                } else {
+                    throw llmErr;
+                }
             }
         }
         } // End of else block (if no override)
