@@ -235,14 +235,35 @@ function checkApiStatus() {
             if (brainLabel && data.brain) {
                 brainLabel.textContent = data.brain.includes('Qwen') ? 'Qwen 3.8' : 'AI Brain';
             }
-            updateIndicator('status-usitc', data.usitc);
-            updateIndicator('status-icegate', data.icegate);
+            
+            // HTSC (USITC) status: show disabled / Off cleanly when turned off
+            const usitcEl = document.getElementById('status-usitc');
+            if (usitcEl) {
+                if (data.usitc === 'disabled' || data.usitc === false) {
+                    usitcEl.className = 'api-status disabled';
+                    usitcEl.querySelector('.status-text').textContent = 'HTSC: Off';
+                } else {
+                    usitcEl.className = 'api-status online';
+                    usitcEl.querySelector('.status-text').textContent = 'HTSC: On';
+                }
+            }
+
+            // ICEGate status
+            const iceEl = document.getElementById('status-icegate');
+            if (iceEl) {
+                iceEl.className = data.icegate ? 'api-status online' : 'api-status offline';
+                iceEl.querySelector('.status-text').textContent = 'ICEGate';
+            }
         })
         .catch(error => {
             console.error('API Status Check Failed:', error);
             updateIndicator('status-server', false);
             updateIndicator('status-brain', false);
-            updateIndicator('status-usitc', false);
+            const usitcEl = document.getElementById('status-usitc');
+            if (usitcEl) {
+                usitcEl.className = 'api-status disabled';
+                usitcEl.querySelector('.status-text').textContent = 'HTSC: Off';
+            }
             updateIndicator('status-icegate', false);
         });
 }

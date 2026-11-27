@@ -43,11 +43,52 @@ if (HF_TOKEN) {
 }
 
 const USITC_TOKEN = process.env.USITC_TOKEN;
+// ── HTSC / USITC Switch ──
+// Defaults to false (HTSC turned off to avoid errors and prioritize ICEGATE accuracy)
+const ENABLE_USITC = process.env.ENABLE_USITC === 'true';
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'antdigital/lingdt-decision-fast-1.0:free';
 const OPENROUTER_DECISIONS_URL = 'https://openrouter.ai/api/alpha/decisions';
 const USITC_LOOKUP_URL = 'https://datawebws.usitc.gov/dataweb/api/v2/tariff/currentTariffLookup';
 const USITC_DETAILS_URL = 'https://datawebws.usitc.gov/dataweb/api/v2/tariff/currentTariffDetails';
 const TARIFF_YEAR = '2024';
+
+// ── In-memory cache for ICEGATE heading lookups (0ms for repeated headings in bulk) ──
+const icegateHeadingCache = new Map();
+
+/**
+ * Fetch official 8-digit tariff lines directly from ICEGATE by 4-digit heading
+ */
+async function searchIcegateByHeading(heading) {
+    if (!heading) return [];
+    const h4 = String(heading).replace(/\./g, '').substring(0, 4);
+    if (icegateHeadingCache.has(h4)) {
+        return icegateHeadingCache.get(h4);
+    }
+
+    try {
+        const response = await fetch(`https://www.icegate.gov.in/Webappl/Desc_details_itchs?cth=${h4}&item_desc=`);
+        if (!response.ok) return [];
+        const data = await response.json();
+        const items = data.rsAllCth || [];
+
+        // Filter and format 8-digit tariff items with valid descriptions
+        const candidates = items
+            .filter(i => i.itc_code && i.itc_code.length === 8 && i.itc_desc)
+            .map(i => ({
+                code: i.itc_code,
+                desc: i.itc_desc,
+                policy: i.itchs_policy || 'Free',
+                duty: i.rta != null ? `${i.rta}%` : 'N/A',
+                uqc: i.uqc || ''
+            }));
+
+        icegateHeadingCache.set(h4, candidates);
+        return candidates;
+    } catch (e) {
+        console.error(`ICEGate heading search error for ${h4}:`, e.message);
+        return [];
+    }
+}
 
 /**
  * Detect if a model is an OpenRouter decisions model (which requires /api/alpha/decisions)
@@ -146,9 +187,10 @@ const HTS_TAXONOMY_RULES = [
         allowedChapters: ["96", "39", "73", "76", "70"],
         keywords: ["vacuum flask", "water bottle", "tableware plastic bottle"],
         fallbackCandidates: [
-            { code: "96170010", desc: "Vacuum flasks and other vacuum vessels, complete with cases, capacity exceeding 1 liter" },
-            { code: "96170030", desc: "Vacuum flasks and other vacuum vessels, complete with cases, capacity not exceeding 1 liter" },
-            { code: "39241040", desc: "Tableware and kitchenware of plastics: reusable drinkware, water bottles, and tumblers" },
+            { code: "39241010", desc: "Tableware and kitchenware of plastics: insulated ware (reusable water bottles)" },
+            { code: "96170011", desc: "Vacuum flasks having a capacity not exceeding 0.75 l" },
+            { code: "96170012", desc: "Vacuum flasks having a capacity exceeding 0.75 l" },
+            { code: "39241090", desc: "Tableware and kitchenware of plastics: other" },
             { code: "73239300", desc: "Table, kitchen or other household articles and parts thereof, of stainless steel (metal water bottles)" },
             { code: "76151000", desc: "Table, kitchen or other household articles and parts thereof, of aluminum (aluminum sports bottles)" }
         ]
@@ -161,9 +203,10 @@ const HTS_TAXONOMY_RULES = [
         allowedChapters: ["22"],
         keywords: ["mineral water", "drinking water", "aerated waters"],
         fallbackCandidates: [
-            { code: "22011000", desc: "Mineral waters and aerated waters, not containing added sugar or other sweetening matter nor flavored" },
-            { code: "22019000", desc: "Other waters, including natural or artificial mineral waters and aerated waters; ice and snow" },
-            { code: "22021000", desc: "Waters, including mineral waters and aerated waters, containing added sugar or other sweetening matter or flavored" }
+            { code: "22011010", desc: "Mineral waters, not containing added sugar or other sweetening matter nor flavored" },
+            { code: "22011020", desc: "Aerated waters, not containing added sugar or other sweetening matter nor flavored" },
+            { code: "22019010", desc: "Ice and snow" },
+            { code: "22019090", desc: "Other waters" }
         ]
     },
     {
@@ -173,7 +216,7 @@ const HTS_TAXONOMY_RULES = [
         allowedChapters: ["64"],
         keywords: ["footwear rubber plastics", "sports footwear textile", "footwear leather uppers"],
         fallbackCandidates: [
-            { code: "64041190", desc: "Sports footwear with outer soles of rubber or plastics and uppers of textile materials" },
+            { code: "64041100", desc: "Sports footwear; tennis shoes, basketball shoes, gym shoes, training shoes and the like" },
             { code: "64021990", desc: "Other sports footwear with outer soles and uppers of rubber or plastics" },
             { code: "64039990", desc: "Footwear with outer soles of rubber, plastics, leather and uppers of leather" },
             { code: "64041990", desc: "Footwear with outer soles of rubber or plastics and uppers of textile materials, other" }
@@ -416,11 +459,11 @@ function sanitizeAndValidateClassification(productTitle, selectedHsCode, selecte
         if (isBannedChapter || isToxicDesc || !finalCode) {
             console.warn(`SANITIZER TRIGGERED: Blocked invalid HTS ${finalCode} ("${finalDesc}") for drinkware: "${productTitle}"`);
             if (/\b(steel|stainless|metal|vacuum|insulated)\b/i.test(t)) {
-                finalCode = '96170010';
-                finalDesc = 'Vacuum flasks and other vacuum vessels, complete with cases, capacity exceeding 1 liter';
+                finalCode = '96170011';
+                finalDesc = 'Vacuum flasks having a capacity not exceeding 0.75 l';
             } else {
-                finalCode = '39241040';
-                finalDesc = 'Tableware and kitchenware of plastics: reusable drinkware, water bottles, and tumblers';
+                finalCode = '39241010';
+                finalDesc = 'Tableware and kitchenware of plastics: insulated ware';
             }
             finalName = 'Water Bottle';
         }
@@ -434,8 +477,8 @@ function sanitizeAndValidateClassification(productTitle, selectedHsCode, selecte
 
         if (isBannedChapter || isToxicDesc || !finalCode) {
             console.warn(`SANITIZER TRIGGERED: Blocked invalid HTS ${finalCode} ("${finalDesc}") for drinking water: "${productTitle}"`);
-            finalCode = '22011000';
-            finalDesc = 'Mineral waters and aerated waters, not containing added sugar or other sweetening matter nor flavored';
+            finalCode = '22011010';
+            finalDesc = 'Mineral waters, not containing added sugar or other sweetening matter nor flavored';
             finalName = 'Drinking Water';
         }
     }
@@ -445,8 +488,8 @@ function sanitizeAndValidateClassification(productTitle, selectedHsCode, selecte
         const ch = finalCode.substring(0, 2);
         if (ch !== '64' || !finalCode) {
             console.warn(`SANITIZER TRIGGERED: Blocked invalid HTS ${finalCode} for footwear: "${productTitle}"`);
-            finalCode = '64041190';
-            finalDesc = 'Sports footwear with outer soles of rubber or plastics and uppers of textile materials';
+            finalCode = '64041100';
+            finalDesc = 'Sports footwear; tennis shoes, basketball shoes, gym shoes, training shoes and the like';
         }
     }
 
@@ -555,6 +598,7 @@ article description: [Official article description copied EXACTLY from the candi
 Do not provide explanations or extra commentary. Return only the formatted result.`;
 
 async function searchTariffs(keyword) {
+    if (!ENABLE_USITC) return [];
     try {
         const headers = { 'Content-Type': 'application/json' };
         if (USITC_TOKEN) {
@@ -575,6 +619,7 @@ async function searchTariffs(keyword) {
 }
 
 async function getTariffRate(hsCode) {
+    if (!ENABLE_USITC) return "N/A (HTSC Off)";
     try {
         const headers = {};
         if (USITC_TOKEN) {
@@ -656,7 +701,7 @@ async function getIndiaData(hsCode, productTitle = '') {
 const serviceHealth = {
     huggingFace: Boolean(HF_TOKEN),
     openRouter: true,
-    usitc: true,
+    usitc: ENABLE_USITC ? true : 'disabled',
     icegate: true,
     lastChecked: Date.now()
 };
@@ -684,19 +729,23 @@ async function checkServiceHealth() {
         serviceHealth.openRouter = orRes.ok;
     } catch { serviceHealth.openRouter = false; }
 
-    // 3. USITC (Lookup endpoint with a dummy query)
-    try {
-        const headers = { 'Content-Type': 'application/json' };
-        if (USITC_TOKEN) {
-            headers['Authorization'] = `Bearer ${USITC_TOKEN}`;
-        }
-        const usitcRes = await fetch(USITC_LOOKUP_URL, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({ searchTerm: '3305', tariffYear: TARIFF_YEAR })
-        });
-        serviceHealth.usitc = usitcRes.ok;
-    } catch { serviceHealth.usitc = false; }
+    // 3. USITC (only if explicitly enabled)
+    if (ENABLE_USITC) {
+        try {
+            const headers = { 'Content-Type': 'application/json' };
+            if (USITC_TOKEN) {
+                headers['Authorization'] = `Bearer ${USITC_TOKEN}`;
+            }
+            const usitcRes = await fetch(USITC_LOOKUP_URL, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ searchTerm: '3305', tariffYear: TARIFF_YEAR })
+            });
+            serviceHealth.usitc = usitcRes.ok;
+        } catch { serviceHealth.usitc = false; }
+    } else {
+        serviceHealth.usitc = 'disabled';
+    }
 
     // 4. ICEGate (Lookup endpoint with a dummy query)
     try {
@@ -718,7 +767,7 @@ app.get('/api/ping', (req, res) => {
         brain: HF_TOKEN ? `HuggingFace (${HF_MODEL})` : `OpenRouter (${OPENROUTER_MODEL})`,
         huggingFace: serviceHealth.huggingFace,
         openRouter: serviceHealth.openRouter,
-        usitc: serviceHealth.usitc,
+        usitc: ENABLE_USITC ? serviceHealth.usitc : 'disabled',
         icegate: serviceHealth.icegate
     });
 });
@@ -780,8 +829,8 @@ app.post('/api/classify', async (req, res) => {
             // We have a manual override!
             hsCode = overrideHsCode;
             
-            // Search USITC for the overridden code just to get the official description
-            const overrideCandidates = await searchTariffs(hsCode);
+            // Search ICEGate for the overridden code just to get the official description
+            const overrideCandidates = await searchIcegateByHeading(hsCode.substring(0, 4));
             const match = overrideCandidates.find(c => c.code === hsCode || String(c.code).replace(/\./g, '') === hsCode);
             articleDescription = match ? match.desc : "Manual Override - Official Description Not Found";
             
@@ -816,25 +865,24 @@ app.post('/api/classify', async (req, res) => {
             }
         }
 
-        // ── Step 2: Fetch USITC Tariffs Targeted by Heading in Parallel ──
-        console.log(`Step 2: Fetching targeted USITC Tariffs for headings: [${targetHeadings.join(', ')}]...`);
+        // ── Step 2: Fetch ICEGATE Tariffs Targeted by Heading in Parallel (Fast & Accurate) ──
+        console.log(`Step 2: Fetching targeted ICEGATE Tariffs for headings: [${targetHeadings.join(', ')}]...`);
         let allCandidates = [];
 
-        // Search USITC for targeted 4-digit headings in parallel (blazing fast)
+        // Search ICEGATE for targeted 4-digit headings in parallel (blazing fast)
         if (targetHeadings.length > 0) {
-            const headingPromises = targetHeadings.slice(0, 4).map(h => searchTariffs(h));
+            const headingPromises = targetHeadings.slice(0, 4).map(h => searchIcegateByHeading(h));
             const results = await Promise.all(headingPromises);
             for (const list of results) {
                 allCandidates = allCandidates.concat(list);
             }
         }
 
-        // Also search with meaningful extracted keywords if candidates are scarce
-        const keywords = extractKeywords(productTitle);
-        if (allCandidates.length < 5 && keywords.length > 0) {
-            const kwPromises = keywords.slice(0, 2).map(kw => searchTariffs(kw));
-            const kwResults = await Promise.all(kwPromises);
-            for (const list of kwResults) {
+        // If USITC is explicitly enabled, also query USITC
+        if (ENABLE_USITC && targetHeadings.length > 0) {
+            const usitcPromises = targetHeadings.slice(0, 4).map(h => searchTariffs(h));
+            const usitcResults = await Promise.all(usitcPromises);
+            for (const list of usitcResults) {
                 allCandidates = allCandidates.concat(list);
             }
         }
