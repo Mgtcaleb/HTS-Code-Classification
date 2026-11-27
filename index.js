@@ -26,6 +26,22 @@ const openai = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY, 
 });
 
+// Initialize Hugging Face AI Brain (Qwen/Qwen3.8-2.4T-A95B)
+const HF_TOKEN = (process.env.HF_TOKEN || process.env.HUGGINGFACE_TOKEN || process.env.HUGGING_FACE_TOKEN || process.env.HUGGINGFACE_API_KEY || process.env.HF_API_KEY || '').replace(/['"]/g, '').trim();
+const HF_MODEL = process.env.HF_MODEL || 'Qwen/Qwen3.8-2.4T-A95B';
+const HF_ROUTER_URL = 'https://router.huggingface.co/v1';
+
+let hfClient = null;
+if (HF_TOKEN) {
+    hfClient = new OpenAI({
+        baseURL: HF_ROUTER_URL,
+        apiKey: HF_TOKEN,
+    });
+    console.log(`Hugging Face Brain initialized with model: ${HF_MODEL}`);
+} else {
+    console.log('No HF_TOKEN detected in environment. Using OpenRouter as fallback AI brain.');
+}
+
 const USITC_TOKEN = process.env.USITC_TOKEN;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'antdigital/lingdt-decision-fast-1.0:free';
 const OPENROUTER_DECISIONS_URL = 'https://openrouter.ai/api/alpha/decisions';
@@ -306,6 +322,41 @@ function matchProductTaxonomy(title) {
 }
 
 /**
+ * Call the AI Brain: Hugging Face (Qwen/Qwen3.8-2.4T-A95B) if token provided, else OpenRouter
+ */
+async function callBrainChatCompletion({ messages, temperature = 0, max_tokens = 300 }) {
+    if (hfClient) {
+        try {
+            console.log(`Calling Hugging Face Brain (${HF_MODEL})...`);
+            const hfRes = await hfClient.chat.completions.create({
+                model: HF_MODEL,
+                messages,
+                temperature,
+                max_tokens,
+            });
+            const content = hfRes.choices?.[0]?.message?.content || hfRes.choices?.[0]?.message?.reasoning || '';
+            if (content.trim()) return content.trim();
+        } catch (hfErr) {
+            console.warn(`Hugging Face Brain call failed (${hfErr.message}), falling back to OpenRouter...`);
+        }
+    }
+
+    const chatModel = isDecisionModel(OPENROUTER_MODEL)
+        ? (process.env.OPENROUTER_CHAT_FALLBACK_MODEL || 'openrouter/free')
+        : OPENROUTER_MODEL;
+
+    console.log(`Calling OpenRouter (${chatModel})...`);
+    const orRes = await openai.chat.completions.create({
+        model: chatModel,
+        messages,
+        temperature,
+        max_tokens,
+    });
+
+    return orRes.choices?.[0]?.message?.content || orRes.choices?.[0]?.message?.reasoning || '';
+}
+
+/**
  * AI Heading and Category Extractor for products not covered by fast taxonomy
  */
 async function extractAiHeadings(title) {
@@ -315,24 +366,18 @@ async function extractAiHeadings(title) {
     }
 
     try {
-        const chatModel = isDecisionModel(OPENROUTER_MODEL)
-            ? (process.env.OPENROUTER_CHAT_FALLBACK_MODEL || 'openrouter/free')
-            : OPENROUTER_MODEL;
-
-        const response = await openai.chat.completions.create({
-            model: chatModel,
-            temperature: 0,
-            max_tokens: 150,
+        const raw = await callBrainChatCompletion({
             messages: [
                 {
                     role: 'system',
                     content: 'You are an expert customs broker. Given a product title, return a JSON object with:\n1. "refinedName": clean customs product description (string)\n2. "headings": array of 2-4 most likely 4-digit HS heading numbers (e.g. ["8471", "8504"])\n3. "allowedChapters": array of 2-digit HS chapters (e.g. ["84", "85"])\nReturn ONLY valid JSON.'
                 },
                 { role: 'user', content: title }
-            ]
+            ],
+            temperature: 0,
+            max_tokens: 150
         });
 
-        const raw = response.choices[0]?.message?.content || response.choices[0]?.message?.reasoning || '';
         const jsonMatch = raw.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
             const parsed = JSON.parse(jsonMatch[0]);
@@ -344,6 +389,82 @@ async function extractAiHeadings(title) {
     }
 
     return null;
+}
+
+// ── Permanent Anti-Hallucination & Non-Food Toxic Word Filter ──
+const TOXIC_VEGETABLE_KEYWORDS = [
+    'bamboo shoot', 'water chestnut', 'vegetables', 'uncooked or cooked by steaming',
+    'boiling in water', 'frozen', 'tarragon', 'crustaceans', 'edible', 'plant', 'mushroom'
+];
+
+/**
+ * Permanent Post-Classification Sanity & Category Validator
+ * Ensures that non-food goods (like water bottles) can NEVER receive vegetable or food codes
+ */
+function sanitizeAndValidateClassification(productTitle, selectedHsCode, selectedDescription, selectedProductName) {
+    const t = productTitle.toLowerCase().trim();
+    let finalCode = (selectedHsCode || '').replace(/\./g, '').trim();
+    let finalDesc = selectedDescription || '';
+    let finalName = selectedProductName || cleanCustomsTitle(productTitle);
+
+    // 1. Water Bottle / Drinkware Validation (Strict chapters: 39, 73, 76, 96, 70)
+    if (/\b(water\s*bottle|flask|thermos|tumbler|sipper|drinking\s*bottle|sports\s*bottle)\b/i.test(t)) {
+        const ch = finalCode.substring(0, 2);
+        const isBannedChapter = ['01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','21','22','23','24'].includes(ch);
+        const isToxicDesc = TOXIC_VEGETABLE_KEYWORDS.some(kw => finalDesc.toLowerCase().includes(kw));
+
+        if (isBannedChapter || isToxicDesc || !finalCode) {
+            console.warn(`SANITIZER TRIGGERED: Blocked invalid HTS ${finalCode} ("${finalDesc}") for drinkware: "${productTitle}"`);
+            if (/\b(steel|stainless|metal|vacuum|insulated)\b/i.test(t)) {
+                finalCode = '96170010';
+                finalDesc = 'Vacuum flasks and other vacuum vessels, complete with cases, capacity exceeding 1 liter';
+            } else {
+                finalCode = '39241040';
+                finalDesc = 'Tableware and kitchenware of plastics: reusable drinkware, water bottles, and tumblers';
+            }
+            finalName = 'Water Bottle';
+        }
+    }
+
+    // 2. Drinking Water Validation (Strict chapter: 22)
+    else if (/\b(drinking\s*water|mineral\s*water|spring\s*water|purified\s*water|^water$)\b/i.test(t) && !/\b(bottle|pump|filter|heater|tank|gun|color|melon|purifier)\b/i.test(t)) {
+        const ch = finalCode.substring(0, 2);
+        const isBannedChapter = ch !== '22';
+        const isToxicDesc = TOXIC_VEGETABLE_KEYWORDS.some(kw => finalDesc.toLowerCase().includes(kw));
+
+        if (isBannedChapter || isToxicDesc || !finalCode) {
+            console.warn(`SANITIZER TRIGGERED: Blocked invalid HTS ${finalCode} ("${finalDesc}") for drinking water: "${productTitle}"`);
+            finalCode = '22011000';
+            finalDesc = 'Mineral waters and aerated waters, not containing added sugar or other sweetening matter nor flavored';
+            finalName = 'Drinking Water';
+        }
+    }
+
+    // 3. Footwear Validation (Strict chapter: 64)
+    else if (/\b(shoes|sneakers|boots|sandals|slippers|footwear)\b/i.test(t)) {
+        const ch = finalCode.substring(0, 2);
+        if (ch !== '64' || !finalCode) {
+            console.warn(`SANITIZER TRIGGERED: Blocked invalid HTS ${finalCode} for footwear: "${productTitle}"`);
+            finalCode = '64041190';
+            finalDesc = 'Sports footwear with outer soles of rubber or plastics and uppers of textile materials';
+        }
+    }
+
+    // 4. General Non-Food Items (Never allow Chapter 07 vegetables!)
+    else if (!/\b(seed|grain|fruit|vegetable|food|spice|tea|coffee|meat|fish|herb)\b/i.test(t)) {
+        const ch = finalCode.substring(0, 2);
+        if (ch === '07' || TOXIC_VEGETABLE_KEYWORDS.some(kw => finalDesc.toLowerCase().includes(kw))) {
+            console.warn(`SANITIZER TRIGGERED: Non-food item "${productTitle}" had vegetable code ${finalCode}. Blocked.`);
+            finalCode = '';
+            finalDesc = '';
+        }
+    }
+
+    return {
+        hsCode: finalCode,
+        articleDescription: finalDesc,
+        productName: finalName
+    };
 }
 
 // ── Marketing / filler words to strip before searching USITC (FREE, no LLM) ──
@@ -508,6 +629,7 @@ async function getIndiaData(hsCode) {
 
 // ── Service Health Checker ──
 const serviceHealth = {
+    huggingFace: Boolean(HF_TOKEN),
     openRouter: true,
     usitc: true,
     icegate: true,
@@ -517,7 +639,19 @@ const serviceHealth = {
 async function checkServiceHealth() {
     console.log('Running background health check on external APIs...');
     
-    // 1. OpenRouter (Check Auth Key endpoint)
+    // 1. Hugging Face Brain (if token configured)
+    if (HF_TOKEN) {
+        try {
+            const hfRes = await fetch('https://router.huggingface.co/v1/models', {
+                headers: { 'Authorization': `Bearer ${HF_TOKEN}` }
+            });
+            serviceHealth.huggingFace = hfRes.ok;
+        } catch { serviceHealth.huggingFace = false; }
+    } else {
+        serviceHealth.huggingFace = false;
+    }
+
+    // 2. OpenRouter (Check Auth Key endpoint)
     try {
         const orRes = await fetch('https://openrouter.ai/api/v1/auth/key', {
             headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` }
@@ -525,7 +659,7 @@ async function checkServiceHealth() {
         serviceHealth.openRouter = orRes.ok;
     } catch { serviceHealth.openRouter = false; }
 
-    // 2. USITC (Lookup endpoint with a dummy query)
+    // 3. USITC (Lookup endpoint with a dummy query)
     try {
         const headers = { 'Content-Type': 'application/json' };
         if (USITC_TOKEN) {
@@ -539,14 +673,14 @@ async function checkServiceHealth() {
         serviceHealth.usitc = usitcRes.ok;
     } catch { serviceHealth.usitc = false; }
 
-    // 3. ICEGate (Lookup endpoint with a dummy query)
+    // 4. ICEGate (Lookup endpoint with a dummy query)
     try {
         const iceRes = await fetch('https://www.icegate.gov.in/Webappl/Desc_details_itchs?cth=33051000&item_desc=');
         serviceHealth.icegate = iceRes.ok;
     } catch { serviceHealth.icegate = false; }
     
     serviceHealth.lastChecked = Date.now();
-    console.log(`Health check complete: OR=${serviceHealth.openRouter} USITC=${serviceHealth.usitc} ICE=${serviceHealth.icegate}`);
+    console.log(`Health check complete: HF=${serviceHealth.huggingFace} OR=${serviceHealth.openRouter} USITC=${serviceHealth.usitc} ICE=${serviceHealth.icegate}`);
 }
 
 // Run health checks every 2 minutes to prevent rate limiting
@@ -556,6 +690,8 @@ checkServiceHealth(); // run immediately on startup
 app.get('/api/ping', (req, res) => {
     res.json({
         server: true,
+        brain: HF_TOKEN ? `HuggingFace (${HF_MODEL})` : `OpenRouter (${OPENROUTER_MODEL})`,
+        huggingFace: serviceHealth.huggingFace,
         openRouter: serviceHealth.openRouter,
         usitc: serviceHealth.usitc,
         icegate: serviceHealth.icegate
@@ -694,6 +830,22 @@ app.post('/api/classify', async (req, res) => {
             console.log(`Filtered candidates by allowed chapters [${Array.from(allowedChapters).join(',')}]: ${preFilterCount} → ${allCandidates.length}`);
         }
 
+        // Hard-block food/vegetable chapters and toxic keywords for non-food items (like bottles)
+        const isNonFoodGood = !/\b(vegetable|fruit|seed|grain|spice|food|meat|fish|coffee|tea|herb|plant)\b/i.test(productTitle);
+        if (isNonFoodGood) {
+            allCandidates = allCandidates.filter(c => {
+                const ch = String(c.code).replace(/\./g, '').substring(0, 2);
+                const desc = (c.desc || c.description || '').toLowerCase();
+                if (['01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','21','23','24'].includes(ch)) {
+                    return false;
+                }
+                if (TOXIC_VEGETABLE_KEYWORDS.some(kw => desc.includes(kw))) {
+                    return false;
+                }
+                return true;
+            });
+        }
+
         // Deduplicate candidates
         const uniqueCandidatesMap = new Map();
         for (const c of allCandidates) {
@@ -735,26 +887,20 @@ app.post('/api/classify', async (req, res) => {
         // Build a numbered list so the LLM can reference easily
         const candidateListText = topCandidates.map((c, i) => `${i+1}. Code: ${c.code} | Description: ${c.description}`).join('\n');
 
-        // ── Step 3: Select best match using Decisions API or Chat Completions ──
-        if (isDecisionModel(OPENROUTER_MODEL)) {
-            console.log(`Step 3: Selecting best HS Code using Decisions API (${OPENROUTER_MODEL})...`);
-            const decisionResult = await selectWithDecisionsApi(OPENROUTER_MODEL, productTitle, topCandidates);
-            hsCode = decisionResult.hsCode;
-            articleDescription = decisionResult.articleDescription;
-            productName = decisionResult.productName;
-        } else {
-            console.log('Step 3: Selecting best HS Code (single LLM chat completion call)...');
+        // ── Step 3: Select best match using Hugging Face Brain, Decisions API, or Chat ──
+        if (hfClient) {
+            console.log(`Step 3: Selecting best HS Code using Hugging Face Brain (${HF_MODEL})...`);
             try {
-                const selectionResponse = await openai.chat.completions.create({
-                    model: OPENROUTER_MODEL,
+                const selectionResponse = await hfClient.chat.completions.create({
+                    model: HF_MODEL,
                     temperature: 0,
                     messages: [
                         { role: 'system', content: SELECTION_PROMPT },
                         { role: 'user', content: `Original Product Title: ${productTitle}\n\nValid USITC Candidates (you MUST pick from this list):\n${candidateListText}` }
                     ]
                 });
-                const selectionText = selectionResponse.choices[0].message.content.trim();
-                console.log('LLM raw output:', selectionText);
+                const selectionText = selectionResponse.choices[0]?.message?.content?.trim() || '';
+                console.log('Hugging Face raw output:', selectionText);
 
                 const hsCodeMatch = selectionText.match(/HS Code:\s*([\d.]{6,14})/i);
                 const productNameMatch = selectionText.match(/product name:\s*(.*)/i);
@@ -764,66 +910,116 @@ app.post('/api/classify', async (req, res) => {
                 articleDescription = articleDescMatch ? articleDescMatch[1].trim() : "";
 
                 if (hsCodeMatch && hsCodeMatch[1]) {
-                    // Strip dots — LLM may output "3305.10.00" but USITC uses "33051000"
-                    let llmCode = hsCodeMatch[1].replace(/\./g, '');
-                    console.log(`LLM selected code: ${hsCodeMatch[1]} → normalized: ${llmCode}`);
+                    let chosenCode = hsCodeMatch[1].replace(/\./g, '');
+                    const matched = topCandidates.find(c => c.code === chosenCode);
+                    if (matched) {
+                        hsCode = matched.code;
+                        articleDescription = matched.description;
+                    } else if (topCandidates.length > 0) {
+                        hsCode = topCandidates[0].code;
+                        articleDescription = topCandidates[0].description;
+                    }
+                } else if (topCandidates.length > 0) {
+                    hsCode = topCandidates[0].code;
+                    articleDescription = topCandidates[0].description;
+                }
+            } catch (hfErr) {
+                console.warn(`Hugging Face Brain selection error (${hfErr.message}), falling back to OpenRouter...`);
+            }
+        }
+
+        if (!hsCode) {
+            if (isDecisionModel(OPENROUTER_MODEL)) {
+                console.log(`Step 3: Selecting best HS Code using Decisions API (${OPENROUTER_MODEL})...`);
+                const decisionResult = await selectWithDecisionsApi(OPENROUTER_MODEL, productTitle, topCandidates);
+                hsCode = decisionResult.hsCode;
+                articleDescription = decisionResult.articleDescription;
+                productName = decisionResult.productName;
+            } else {
+                console.log('Step 3: Selecting best HS Code (single LLM chat completion call)...');
+                try {
+                    const selectionResponse = await openai.chat.completions.create({
+                        model: OPENROUTER_MODEL,
+                        temperature: 0,
+                        messages: [
+                            { role: 'system', content: SELECTION_PROMPT },
+                            { role: 'user', content: `Original Product Title: ${productTitle}\n\nValid USITC Candidates (you MUST pick from this list):\n${candidateListText}` }
+                        ]
+                    });
+                    const selectionText = selectionResponse.choices[0]?.message?.content?.trim() || '';
+                    console.log('LLM raw output:', selectionText);
+
+                    const hsCodeMatch = selectionText.match(/HS Code:\s*([\d.]{6,14})/i);
+                    const productNameMatch = selectionText.match(/product name:\s*(.*)/i);
+                    const articleDescMatch = selectionText.match(/article description:\s*(.*)/i);
                     
-                    // VALIDATION: Check if the LLM's code actually exists in our candidate list
-                    const validCodes = topCandidates.map(c => c.code);
-                    
-                    if (validCodes.includes(llmCode)) {
-                        hsCode = llmCode;
-                        console.log(`Code ${hsCode} is valid (found in candidate list).`);
-                    } else {
-                        // LLM hallucinated a code. Find the closest match from the real list.
-                        console.log(`Code ${llmCode} NOT found in candidate list. Finding closest match...`);
+                    productName = productNameMatch ? productNameMatch[1].trim() : cleanCustomsTitle(productTitle);
+                    articleDescription = articleDescMatch ? articleDescMatch[1].trim() : "";
+
+                    if (hsCodeMatch && hsCodeMatch[1]) {
+                        let llmCode = hsCodeMatch[1].replace(/\./g, '');
+                        console.log(`LLM selected code: ${hsCodeMatch[1]} → normalized: ${llmCode}`);
                         
-                        let bestMatch = null;
-                        let bestMatchLength = 0;
-                        for (const candidate of topCandidates) {
-                            let matchLen = 0;
-                            for (let i = 0; i < Math.min(llmCode.length, candidate.code.length); i++) {
-                                if (llmCode[i] === candidate.code[i]) matchLen++;
-                                else break;
+                        const validCodes = topCandidates.map(c => c.code);
+                        if (validCodes.includes(llmCode)) {
+                            hsCode = llmCode;
+                            console.log(`Code ${hsCode} is valid (found in candidate list).`);
+                        } else {
+                            console.log(`Code ${llmCode} NOT found in candidate list. Finding closest match...`);
+                            let bestMatch = null;
+                            let bestMatchLength = 0;
+                            for (const candidate of topCandidates) {
+                                let matchLen = 0;
+                                for (let i = 0; i < Math.min(llmCode.length, candidate.code.length); i++) {
+                                    if (llmCode[i] === candidate.code[i]) matchLen++;
+                                    else break;
+                                }
+                                if (matchLen > bestMatchLength) {
+                                    bestMatchLength = matchLen;
+                                    bestMatch = candidate;
+                                }
                             }
-                            if (matchLen > bestMatchLength) {
-                                bestMatchLength = matchLen;
-                                bestMatch = candidate;
+                            
+                            if (bestMatch) {
+                                hsCode = bestMatch.code;
+                                articleDescription = bestMatch.description;
+                                console.log(`Snapped to closest valid code: ${hsCode} (${articleDescription})`);
+                            } else if (topCandidates.length > 0) {
+                                hsCode = topCandidates[0].code;
+                                articleDescription = topCandidates[0].description;
+                                console.log(`Fallback to first candidate: ${hsCode}`);
                             }
                         }
-                        
-                        if (bestMatch) {
-                            hsCode = bestMatch.code;
-                            articleDescription = bestMatch.description;
-                            console.log(`Snapped to closest valid code: ${hsCode} (${articleDescription})`);
-                        } else if (topCandidates.length > 0) {
+                    } else {
+                        console.log('Could not parse HS Code from LLM output.');
+                        if (topCandidates.length > 0) {
                             hsCode = topCandidates[0].code;
                             articleDescription = topCandidates[0].description;
                             console.log(`Fallback to first candidate: ${hsCode}`);
                         }
                     }
-                } else {
-                    console.log('Could not parse HS Code from LLM output.');
-                    if (topCandidates.length > 0) {
+                } catch (llmErr) {
+                    // If OpenRouter returns the 400 decisions model error, automatically handle it via Decisions API
+                    if (llmErr.message && (llmErr.message.includes('decisions model') || llmErr.message.includes('/api/alpha/decisions'))) {
+                        console.warn('Caught decisions model error from chat/completions endpoint, switching to Decisions API...');
+                        const decisionResult = await selectWithDecisionsApi(OPENROUTER_MODEL, productTitle, topCandidates);
+                        hsCode = decisionResult.hsCode;
+                        articleDescription = decisionResult.articleDescription;
+                        productName = decisionResult.productName;
+                    } else if (topCandidates.length > 0) {
                         hsCode = topCandidates[0].code;
                         articleDescription = topCandidates[0].description;
-                        console.log(`Fallback to first candidate: ${hsCode}`);
                     }
-                }
-            } catch (llmErr) {
-                // If OpenRouter returns the 400 decisions model error, automatically handle it via Decisions API
-                if (llmErr.message && (llmErr.message.includes('decisions model') || llmErr.message.includes('/api/alpha/decisions'))) {
-                    console.warn('Caught decisions model error from chat/completions endpoint, switching to Decisions API...');
-                    const decisionResult = await selectWithDecisionsApi(OPENROUTER_MODEL, productTitle, topCandidates);
-                    hsCode = decisionResult.hsCode;
-                    articleDescription = decisionResult.articleDescription;
-                    productName = decisionResult.productName;
-                } else {
-                    throw llmErr;
                 }
             }
         }
         } // End of else block (if no override)
+
+        // ── Permanent Post-Classification Intelligence & Sanity Validator ──
+        const validated = sanitizeAndValidateClassification(productTitle, hsCode, articleDescription, productName);
+        hsCode = validated.hsCode;
+        articleDescription = validated.articleDescription;
+        productName = validated.productName;
 
         // ── Step 4: Fetch rate using the VALIDATED code ──
         let indiaData = null;

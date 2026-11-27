@@ -218,7 +218,7 @@ function updateIndicator(id, isOnline) {
 
 function checkApiStatus() {
     // Reset all to checking
-    ['status-server', 'status-or', 'status-usitc', 'status-icegate'].forEach(id => {
+    ['status-server', 'status-brain', 'status-usitc', 'status-icegate'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.className = 'api-status checking';
     });
@@ -230,14 +230,18 @@ function checkApiStatus() {
         })
         .then(data => {
             updateIndicator('status-server', data.server);
-            updateIndicator('status-or', data.openRouter);
+            updateIndicator('status-brain', data.huggingFace || data.openRouter);
+            const brainLabel = document.getElementById('brain-label');
+            if (brainLabel && data.brain) {
+                brainLabel.textContent = data.brain.includes('Qwen') ? 'Qwen 3.8' : 'AI Brain';
+            }
             updateIndicator('status-usitc', data.usitc);
             updateIndicator('status-icegate', data.icegate);
         })
         .catch(error => {
             console.error('API Status Check Failed:', error);
             updateIndicator('status-server', false);
-            updateIndicator('status-or', false);
+            updateIndicator('status-brain', false);
             updateIndicator('status-usitc', false);
             updateIndicator('status-icegate', false);
         });
