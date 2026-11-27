@@ -18,6 +18,15 @@ if (supabaseUrl && supabaseKey) {
 
 const app = express();
 app.use(express.json());
+
+// Disable HTTP caching so updates are immediately visible to users without stale cache
+app.use((req, res, next) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+});
+
 app.use(express.static('public'));
 
 // Initialize OpenAI SDK using OpenRouter's base URL
@@ -113,7 +122,6 @@ function cleanCustomsTitle(title) {
  * Call OpenRouter /api/alpha/decisions endpoint for decision models
  */
 async function selectWithDecisionsApi(model, productTitle, topCandidates) {
-    console.log(`Using OpenRouter Decisions API (${OPENROUTER_DECISIONS_URL}) with model: ${model}...`);
     if (!topCandidates || topCandidates.length === 0) {
         return {
             hsCode: '',
@@ -122,56 +130,79 @@ async function selectWithDecisionsApi(model, productTitle, topCandidates) {
         };
     }
 
-    const criteria = {};
-    for (const candidate of topCandidates) {
-        const key = String(candidate.code).replace(/[^a-zA-Z0-9_]/g, '');
-        if (key) {
-            criteria[key] = (candidate.description || 'Candidate code ' + key).substring(0, 300);
-        }
+    if (!process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY === 'missing_key') {
+        console.warn('No OpenRouter API key provided. Snapping directly to top candidate.');
+        return {
+            hsCode: topCandidates[0].code,
+            articleDescription: topCandidates[0].description || topCandidates[0].desc || '',
+            productName: cleanCustomsTitle(productTitle)
+        };
     }
 
-    const response = await fetch(OPENROUTER_DECISIONS_URL, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            model: model,
-            state: {
-                product_title: productTitle
-            },
-            questions: {
-                hs_code: {
-                    type: 'choice',
-                    instructions: 'Select the most accurate Harmonized System (HS) code classification for this product from the available choices.',
-                    criteria: criteria
-                }
+    try {
+        console.log(`Using OpenRouter Decisions API (${OPENROUTER_DECISIONS_URL}) with model: ${model}...`);
+        const criteria = {};
+        for (const candidate of topCandidates) {
+            const key = String(candidate.code).replace(/[^a-zA-Z0-9_]/g, '');
+            if (key) {
+                criteria[key] = (candidate.description || candidate.desc || 'Candidate code ' + key).substring(0, 300);
             }
-        })
-    });
+        }
 
-    const data = await response.json();
-    if (!response.ok) {
-        const errorMsg = data.error?.message || `Decisions API returned status ${response.status}`;
-        throw new Error(errorMsg);
+        const response = await fetch(OPENROUTER_DECISIONS_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: model,
+                state: {
+                    product_title: productTitle
+                },
+                questions: {
+                    hs_code: {
+                        type: 'choice',
+                        instructions: 'Select the most accurate Harmonized System (HS) code classification for this product from the available choices.',
+                        criteria: criteria
+                    }
+                }
+            })
+        });
+
+        if (!response.ok) {
+            console.warn(`Decisions API returned status ${response.status}, snapping to top candidate`);
+            return {
+                hsCode: topCandidates[0].code,
+                articleDescription: topCandidates[0].description || topCandidates[0].desc || '',
+                productName: cleanCustomsTitle(productTitle)
+            };
+        }
+
+        const data = await response.json();
+        const chosenCode = data.answers?.hs_code?.choice;
+        const confidence = data.answers?.hs_code?.confidence;
+        console.log(`Decisions API selected code: ${chosenCode} (confidence: ${confidence})`);
+
+        let matched = topCandidates.find(c => String(c.code).replace(/[^a-zA-Z0-9_]/g, '') === chosenCode);
+        if (!matched && topCandidates.length > 0) {
+            console.log(`Chosen code "${chosenCode}" not directly in candidate list. Snapping to first candidate.`);
+            matched = topCandidates[0];
+        }
+
+        return {
+            hsCode: matched ? matched.code : (chosenCode || ''),
+            articleDescription: matched ? (matched.description || matched.desc) : '',
+            productName: cleanCustomsTitle(productTitle)
+        };
+    } catch (e) {
+        console.warn('selectWithDecisionsApi error:', e.message);
+        return {
+            hsCode: topCandidates[0].code,
+            articleDescription: topCandidates[0].description || topCandidates[0].desc || '',
+            productName: cleanCustomsTitle(productTitle)
+        };
     }
-
-    const chosenCode = data.answers?.hs_code?.choice;
-    const confidence = data.answers?.hs_code?.confidence;
-    console.log(`Decisions API selected code: ${chosenCode} (confidence: ${confidence})`);
-
-    let matched = topCandidates.find(c => String(c.code).replace(/[^a-zA-Z0-9_]/g, '') === chosenCode);
-    if (!matched && topCandidates.length > 0) {
-        console.log(`Chosen code "${chosenCode}" not directly in candidate list. Snapping to first candidate.`);
-        matched = topCandidates[0];
-    }
-
-    return {
-        hsCode: matched ? matched.code : (chosenCode || ''),
-        articleDescription: matched ? matched.description : '',
-        productName: cleanCustomsTitle(productTitle)
-    };
 }
 
 // ── In-memory cache: same product title → same result, zero tokens ──
@@ -384,19 +415,27 @@ async function callBrainChatCompletion({ messages, temperature = 0, max_tokens =
         }
     }
 
-    const chatModel = isDecisionModel(OPENROUTER_MODEL)
-        ? (process.env.OPENROUTER_CHAT_FALLBACK_MODEL || 'openrouter/free')
-        : OPENROUTER_MODEL;
+    if (process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY !== 'missing_key') {
+        try {
+            const chatModel = isDecisionModel(OPENROUTER_MODEL)
+                ? (process.env.OPENROUTER_CHAT_FALLBACK_MODEL || 'openrouter/free')
+                : OPENROUTER_MODEL;
 
-    console.log(`Calling OpenRouter (${chatModel})...`);
-    const orRes = await openai.chat.completions.create({
-        model: chatModel,
-        messages,
-        temperature,
-        max_tokens,
-    });
+            console.log(`Calling OpenRouter (${chatModel})...`);
+            const orRes = await openai.chat.completions.create({
+                model: chatModel,
+                messages,
+                temperature,
+                max_tokens,
+            });
 
-    return orRes.choices?.[0]?.message?.content || orRes.choices?.[0]?.message?.reasoning || '';
+            return orRes.choices?.[0]?.message?.content || orRes.choices?.[0]?.message?.reasoning || '';
+        } catch (orErr) {
+            console.warn(`OpenRouter call failed (${orErr.message})`);
+        }
+    }
+
+    return '';
 }
 
 /**
@@ -1002,89 +1041,74 @@ app.post('/api/classify', async (req, res) => {
         }
 
         if (!hsCode) {
-            if (isDecisionModel(OPENROUTER_MODEL)) {
-                console.log(`Step 3: Selecting best HS Code using Decisions API (${OPENROUTER_MODEL})...`);
-                const decisionResult = await selectWithDecisionsApi(OPENROUTER_MODEL, productTitle, topCandidates);
-                hsCode = decisionResult.hsCode;
-                articleDescription = decisionResult.articleDescription;
-                productName = decisionResult.productName;
-            } else {
-                console.log('Step 3: Selecting best HS Code (single LLM chat completion call)...');
-                try {
-                    const selectionResponse = await openai.chat.completions.create({
-                        model: OPENROUTER_MODEL,
-                        temperature: 0,
-                        messages: [
-                            { role: 'system', content: SELECTION_PROMPT },
-                            { role: 'user', content: `Original Product Title: ${productTitle}\n\nValid USITC Candidates (you MUST pick from this list):\n${candidateListText}` }
-                        ]
-                    });
-                    const selectionText = selectionResponse.choices[0]?.message?.content?.trim() || '';
-                    console.log('LLM raw output:', selectionText);
+            if (process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY !== 'missing_key') {
+                if (isDecisionModel(OPENROUTER_MODEL)) {
+                    console.log(`Step 3: Selecting best HS Code using Decisions API (${OPENROUTER_MODEL})...`);
+                    const decisionResult = await selectWithDecisionsApi(OPENROUTER_MODEL, productTitle, topCandidates);
+                    hsCode = decisionResult.hsCode;
+                    articleDescription = decisionResult.articleDescription;
+                    productName = decisionResult.productName;
+                } else {
+                    console.log('Step 3: Selecting best HS Code (single LLM chat completion call)...');
+                    try {
+                        const selectionResponse = await openai.chat.completions.create({
+                            model: OPENROUTER_MODEL,
+                            temperature: 0,
+                            messages: [
+                                { role: 'system', content: SELECTION_PROMPT },
+                                { role: 'user', content: `Original Product Title: ${productTitle}\n\nValid Official Candidates (you MUST pick from this list):\n${candidateListText}` }
+                            ]
+                        });
+                        const selectionText = selectionResponse.choices[0]?.message?.content?.trim() || '';
+                        console.log('LLM raw output:', selectionText);
 
-                    const hsCodeMatch = selectionText.match(/HS Code:\s*([\d.]{6,14})/i);
-                    const productNameMatch = selectionText.match(/product name:\s*(.*)/i);
-                    const articleDescMatch = selectionText.match(/article description:\s*(.*)/i);
-                    
-                    productName = productNameMatch ? productNameMatch[1].trim() : cleanCustomsTitle(productTitle);
-                    articleDescription = articleDescMatch ? articleDescMatch[1].trim() : "";
-
-                    if (hsCodeMatch && hsCodeMatch[1]) {
-                        let llmCode = hsCodeMatch[1].replace(/\./g, '');
-                        console.log(`LLM selected code: ${hsCodeMatch[1]} → normalized: ${llmCode}`);
+                        const hsCodeMatch = selectionText.match(/HS Code:\s*([\d.]{6,14})/i);
+                        const productNameMatch = selectionText.match(/product name:\s*(.*)/i);
+                        const articleDescMatch = selectionText.match(/article description:\s*(.*)/i);
                         
-                        const validCodes = topCandidates.map(c => c.code);
-                        if (validCodes.includes(llmCode)) {
-                            hsCode = llmCode;
-                            console.log(`Code ${hsCode} is valid (found in candidate list).`);
-                        } else {
-                            console.log(`Code ${llmCode} NOT found in candidate list. Finding closest match...`);
-                            let bestMatch = null;
-                            let bestMatchLength = 0;
-                            for (const candidate of topCandidates) {
-                                let matchLen = 0;
-                                for (let i = 0; i < Math.min(llmCode.length, candidate.code.length); i++) {
-                                    if (llmCode[i] === candidate.code[i]) matchLen++;
-                                    else break;
-                                }
-                                if (matchLen > bestMatchLength) {
-                                    bestMatchLength = matchLen;
-                                    bestMatch = candidate;
-                                }
-                            }
-                            
-                            if (bestMatch) {
-                                hsCode = bestMatch.code;
-                                articleDescription = bestMatch.description;
-                                console.log(`Snapped to closest valid code: ${hsCode} (${articleDescription})`);
+                        productName = productNameMatch ? productNameMatch[1].trim() : cleanCustomsTitle(productTitle);
+                        articleDescription = articleDescMatch ? articleDescMatch[1].trim() : "";
+
+                        if (hsCodeMatch && hsCodeMatch[1]) {
+                            let llmCode = hsCodeMatch[1].replace(/\./g, '');
+                            const matched = topCandidates.find(c => c.code === llmCode);
+                            if (matched) {
+                                hsCode = matched.code;
+                                articleDescription = matched.description || matched.desc;
                             } else if (topCandidates.length > 0) {
                                 hsCode = topCandidates[0].code;
-                                articleDescription = topCandidates[0].description;
-                                console.log(`Fallback to first candidate: ${hsCode}`);
+                                articleDescription = topCandidates[0].description || topCandidates[0].desc;
                             }
-                        }
-                    } else {
-                        console.log('Could not parse HS Code from LLM output.');
-                        if (topCandidates.length > 0) {
+                        } else if (topCandidates.length > 0) {
                             hsCode = topCandidates[0].code;
-                            articleDescription = topCandidates[0].description;
-                            console.log(`Fallback to first candidate: ${hsCode}`);
+                            articleDescription = topCandidates[0].description || topCandidates[0].desc;
                         }
-                    }
-                } catch (llmErr) {
-                    // If OpenRouter returns the 400 decisions model error, automatically handle it via Decisions API
-                    if (llmErr.message && (llmErr.message.includes('decisions model') || llmErr.message.includes('/api/alpha/decisions'))) {
-                        console.warn('Caught decisions model error from chat/completions endpoint, switching to Decisions API...');
-                        const decisionResult = await selectWithDecisionsApi(OPENROUTER_MODEL, productTitle, topCandidates);
-                        hsCode = decisionResult.hsCode;
-                        articleDescription = decisionResult.articleDescription;
-                        productName = decisionResult.productName;
-                    } else if (topCandidates.length > 0) {
-                        hsCode = topCandidates[0].code;
-                        articleDescription = topCandidates[0].description;
+                    } catch (llmErr) {
+                        if (llmErr.message && (llmErr.message.includes('decisions model') || llmErr.message.includes('/api/alpha/decisions'))) {
+                            console.warn('Caught decisions model error, switching to Decisions API...');
+                            const decisionResult = await selectWithDecisionsApi(OPENROUTER_MODEL, productTitle, topCandidates);
+                            hsCode = decisionResult.hsCode;
+                            articleDescription = decisionResult.articleDescription;
+                            productName = decisionResult.productName;
+                        } else if (topCandidates.length > 0) {
+                            hsCode = topCandidates[0].code;
+                            articleDescription = topCandidates[0].description || topCandidates[0].desc;
+                        }
                     }
                 }
+            } else if (topCandidates.length > 0) {
+                console.log(`OpenRouter key not configured. Using top ranked ICEGATE candidate: ${topCandidates[0].code}`);
+                hsCode = topCandidates[0].code;
+                articleDescription = topCandidates[0].description || topCandidates[0].desc;
+                productName = cleanCustomsTitle(productTitle);
             }
+        }
+
+        // Ultimate safe fallback
+        if (!hsCode && topCandidates.length > 0) {
+            hsCode = topCandidates[0].code;
+            articleDescription = topCandidates[0].description || topCandidates[0].desc;
+            productName = cleanCustomsTitle(productTitle);
         }
         } // End of else block (if no override)
 
@@ -1201,3 +1225,5 @@ app.listen(PORT, () => {
     // Start the keep-alive worker initially
     resetKeepAlive();
 });
+
+module.exports = app;

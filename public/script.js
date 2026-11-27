@@ -102,7 +102,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     body: JSON.stringify({ productTitle: items[i] })
                 });
 
-                const data = await response.json();
+                let data;
+                const text = await response.text();
+                try {
+                    data = JSON.parse(text);
+                } catch {
+                    if (!response.ok) {
+                        throw new Error(`Server status ${response.status}. Service temporarily starting or redeploying. Please retry.`);
+                    } else {
+                        throw new Error('Invalid JSON response from server.');
+                    }
+                }
 
                 if (!response.ok) {
                     const errMsg = data.details || data.error || `Server error ${response.status}`;
@@ -217,11 +227,19 @@ function updateIndicator(id, isOnline) {
 }
 
 function checkApiStatus() {
-    // Reset all to checking
-    ['status-server', 'status-brain', 'status-usitc', 'status-icegate'].forEach(id => {
+    // Reset active APIs to checking
+    ['status-server', 'status-brain', 'status-icegate'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.className = 'api-status checking';
     });
+
+    // HTSC is turned off: ensure it remains pinned as disabled with 'HTSC: Off'
+    const usitcEl = document.getElementById('status-usitc');
+    if (usitcEl) {
+        usitcEl.className = 'api-status disabled';
+        const txt = usitcEl.querySelector('.status-text');
+        if (txt) txt.textContent = 'HTSC: Off';
+    }
 
     fetch('/api/ping')
         .then(response => {
