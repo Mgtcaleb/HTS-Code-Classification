@@ -23,7 +23,7 @@ app.use(express.static('public'));
 // Initialize OpenAI SDK using OpenRouter's base URL
 const openai = new OpenAI({
   baseURL: 'https://openrouter.ai/api/v1',
-  apiKey: process.env.OPENROUTER_API_KEY, 
+  apiKey: process.env.OPENROUTER_API_KEY || 'missing_key', 
 });
 
 // Initialize Hugging Face AI Brain (Qwen/Qwen3.8-2.4T-A95B)
@@ -455,8 +455,14 @@ function sanitizeAndValidateClassification(productTitle, selectedHsCode, selecte
         const ch = finalCode.substring(0, 2);
         if (ch === '07' || TOXIC_VEGETABLE_KEYWORDS.some(kw => finalDesc.toLowerCase().includes(kw))) {
             console.warn(`SANITIZER TRIGGERED: Non-food item "${productTitle}" had vegetable code ${finalCode}. Blocked.`);
-            finalCode = '';
-            finalDesc = '';
+            const matched = matchProductTaxonomy(productTitle);
+            if (matched && matched.fallbackCandidates?.length > 0) {
+                finalCode = matched.fallbackCandidates[0].code;
+                finalDesc = matched.fallbackCandidates[0].desc;
+            } else {
+                finalCode = '';
+                finalDesc = '';
+            }
         }
     }
 
@@ -590,21 +596,38 @@ async function getTariffRate(hsCode) {
     }
 }
 
-async function getIndiaData(hsCode) {
+async function getIndiaData(hsCode, productTitle = '') {
     try {
-        const response = await fetch(`https://www.icegate.gov.in/Webappl/Desc_details_itchs?cth=${hsCode}&item_desc=`);
+        const cleanHs = (hsCode || '').replace(/\./g, '').trim();
+        if (!cleanHs) return null;
+
+        const response = await fetch(`https://www.icegate.gov.in/Webappl/Desc_details_itchs?cth=${cleanHs}&item_desc=`);
         if (!response.ok) return null;
         const data = await response.json();
-        const items = data.rsAllCth || [];
+        let items = data.rsAllCth || [];
         if (items.length === 0) return null;
+
+        // Strict protection against vegetable hallucinations (e.g. Terragon) for non-food items
+        const isNonFood = productTitle && !/\b(vegetable|fruit|seed|grain|spice|food|meat|fish|coffee|tea|herb|plant)\b/i.test(productTitle);
+        if (isNonFood) {
+            items = items.filter(i => {
+                const desc = (i.itc_desc || '').toLowerCase();
+                const code = (i.itc_code || '');
+                if (code.startsWith('07') || TOXIC_VEGETABLE_KEYWORDS.some(kw => desc.includes(kw))) {
+                    return false;
+                }
+                return true;
+            });
+            if (items.length === 0) return null;
+        }
 
         // Find the most specific matching code
         // 1. Exact 8-digit match
-        let bestMatch = items.find(i => i.itc_code === hsCode);
+        let bestMatch = items.find(i => i.itc_code === cleanHs);
         
         // 2. 6-digit prefix match (if US code ends in different sub-digits than India)
-        if (!bestMatch && hsCode.length >= 6) {
-            const prefix6 = hsCode.substring(0, 6);
+        if (!bestMatch && cleanHs.length >= 6) {
+            const prefix6 = cleanHs.substring(0, 6);
             bestMatch = items.find(i => i.itc_code && i.itc_code.startsWith(prefix6) && i.itc_code.length === 8 && i.uqc);
         }
 
@@ -613,6 +636,8 @@ async function getIndiaData(hsCode) {
             const eightDigit = items.filter(i => i.itc_code && i.itc_code.length === 8 && i.uqc);
             bestMatch = eightDigit.length > 0 ? eightDigit[0] : items[items.length - 1];
         }
+
+        if (!bestMatch) return null;
 
         return {
             itcCode: bestMatch.itc_code || '',
@@ -1027,7 +1052,7 @@ app.post('/api/classify', async (req, res) => {
             console.log(`Step 4: Fetching Duty Rate for validated code: ${hsCode}...`);
             const [fetchedRate, fetchedIndiaData] = await Promise.all([
                 getTariffRate(hsCode),
-                getIndiaData(hsCode)
+                getIndiaData(hsCode, productTitle)
             ]);
             rate = fetchedRate;
             indiaData = fetchedIndiaData;
