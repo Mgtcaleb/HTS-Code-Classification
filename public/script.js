@@ -46,14 +46,54 @@ document.addEventListener('DOMContentLoaded', () => {
             rows.push(tr);
         });
 
-        // Process sequentially
-        for (let i = 0; i < items.length; i++) {
+        const progressContainer = document.getElementById('progress-container');
+        const progressBarFill = document.getElementById('progress-bar-fill');
+        const progressText = document.getElementById('progress-text');
+        const progressSpeed = document.getElementById('progress-speed');
+        const stopBtn = document.getElementById('stop-btn');
+
+        // Concurrency settings for high throughput (8 concurrent workers for bulk items)
+        const CONCURRENCY = 8;
+        let isStopped = false;
+        let completedCount = 0;
+        let successCount = 0;
+        let errorCount = 0;
+        const totalItems = items.length;
+        const startTime = Date.now();
+
+        stopBtn.classList.remove('hidden');
+        stopBtn.disabled = false;
+        stopBtn.textContent = 'Stop Processing';
+        progressContainer.classList.remove('hidden');
+
+        function updateProgress() {
+            const pct = totalItems > 0 ? Math.round((completedCount / totalItems) * 100) : 0;
+            progressBarFill.style.width = `${pct}%`;
+            const elapsedSec = (Date.now() - startTime) / 1000;
+            const rate = elapsedSec > 0.5 ? (completedCount / elapsedSec).toFixed(1) : '0';
+            progressText.textContent = `Processed: ${completedCount} / ${totalItems} (${pct}%) • Success: ${successCount} • Errors: ${errorCount}`;
+            progressSpeed.textContent = `Speed: ${rate} items/sec`;
+        }
+
+        updateProgress();
+
+        const stopHandler = () => {
+            isStopped = true;
+            stopBtn.disabled = true;
+            stopBtn.textContent = 'Stopping...';
+        };
+        stopBtn.onclick = stopHandler;
+
+        async function processItem(i) {
+            if (isStopped) return;
             const row = rows[i];
             const statusCell = row.querySelector('.col-status');
-            
-            // Mark as processing
             statusCell.innerHTML = '<span class="status-badge status-processing">Processing...</span>';
-            row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+            // Only auto-scroll on small batches to prevent browser jank on 1000 items
+            if (totalItems <= 15) {
+                row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
 
             try {
                 const response = await fetch('/api/classify', {
@@ -65,18 +105,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 const data = await response.json();
 
                 if (!response.ok) {
-                    // Show the exact error from the server
                     const errMsg = data.details || data.error || `Server error ${response.status}`;
                     throw new Error(errMsg);
                 }
                 
-                // Expecting backend to return parsed data alongside raw result string
                 if (data.data) {
                     row.querySelector('.col-refined').textContent = data.data.productName || 'N/A';
                     row.querySelector('.col-hscode').textContent = data.data.hsCode || 'N/A';
                     row.querySelector('.col-desc').textContent = data.data.articleDescription || 'N/A';
                     row.querySelector('.col-rate').textContent = data.data.dutyRate || 'N/A';
-                    // India data
                     if (data.data.india) {
                         row.querySelector('.col-itc').textContent = data.data.india.itcCode || 'N/A';
                         row.querySelector('.col-itcdesc').textContent = data.data.india.itcDesc || 'N/A';
@@ -84,21 +121,44 @@ document.addEventListener('DOMContentLoaded', () => {
                         row.querySelector('.col-bcd').textContent = data.data.india.indiaDuty || 'N/A';
                     }
                 } else {
-                    // Fallback to raw result if structure is missing
-                    row.querySelector('.col-desc').textContent = data.result;
+                    row.querySelector('.col-desc').textContent = data.result || '';
                 }
 
                 statusCell.innerHTML = '<span class="status-badge status-success">Done</span>';
                 const teachBtn = row.querySelector('.teach-btn');
                 if (teachBtn) teachBtn.classList.remove('hidden');
+                successCount++;
 
             } catch (err) {
                 statusCell.innerHTML = '<span class="status-badge status-error">Error</span>';
                 row.querySelector('.col-desc').textContent = err.message;
                 const teachBtn = row.querySelector('.teach-btn');
                 if (teachBtn) teachBtn.classList.remove('hidden');
+                errorCount++;
+            } finally {
+                completedCount++;
+                updateProgress();
             }
         }
+
+        // Concurrency Worker Pool
+        let nextIndex = 0;
+        async function worker() {
+            while (nextIndex < totalItems && !isStopped) {
+                const i = nextIndex++;
+                await processItem(i);
+            }
+        }
+
+        const workers = [];
+        const workerCount = Math.min(CONCURRENCY, totalItems);
+        for (let w = 0; w < workerCount; w++) {
+            workers.push(worker());
+        }
+        await Promise.all(workers);
+
+        stopBtn.classList.add('hidden');
+        stopBtn.onclick = null;
 
         // Restore UI
         submitBtn.disabled = false;

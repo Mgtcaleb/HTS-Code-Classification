@@ -119,6 +119,232 @@ async function selectWithDecisionsApi(model, productTitle, topCandidates) {
 
 // ── In-memory cache: same product title → same result, zero tokens ──
 const resultCache = new Map();
+const aiHeadingCache = new Map();
+
+// ── Fast-path HTS Taxonomy for Commercial E-commerce & Retail Goods ──
+const HTS_TAXONOMY_RULES = [
+    {
+        category: "Drinkware / Water Bottles",
+        pattern: /\b(water\s*bottle|sipper\s*bottle|flask|vacuum\s*flask|thermos|tumbler|hydration\s*bottle|shaker\s*bottle|drinking\s*bottle|sports\s*bottle)\b/i,
+        headings: ["9617", "3924", "7323", "7615", "3923"],
+        allowedChapters: ["96", "39", "73", "76", "70"],
+        keywords: ["vacuum flask", "water bottle", "tableware plastic bottle"],
+        fallbackCandidates: [
+            { code: "96170010", desc: "Vacuum flasks and other vacuum vessels, complete with cases, capacity exceeding 1 liter" },
+            { code: "96170030", desc: "Vacuum flasks and other vacuum vessels, complete with cases, capacity not exceeding 1 liter" },
+            { code: "39241040", desc: "Tableware and kitchenware of plastics: reusable drinkware, water bottles, and tumblers" },
+            { code: "73239300", desc: "Table, kitchen or other household articles and parts thereof, of stainless steel (metal water bottles)" },
+            { code: "76151000", desc: "Table, kitchen or other household articles and parts thereof, of aluminum (aluminum sports bottles)" }
+        ]
+    },
+    {
+        category: "Drinking Water / Mineral Water",
+        pattern: /\b(drinking\s*water|mineral\s*water|spring\s*water|purified\s*water|sparkling\s*water|packaged\s*water|^water$)\b/i,
+        negativePattern: /\b(bottle|pump|filter|heater|tank|gun|color|melon|purifier|supply|pipe)\b/i,
+        headings: ["2201", "2202"],
+        allowedChapters: ["22"],
+        keywords: ["mineral water", "drinking water", "aerated waters"],
+        fallbackCandidates: [
+            { code: "22011000", desc: "Mineral waters and aerated waters, not containing added sugar or other sweetening matter nor flavored" },
+            { code: "22019000", desc: "Other waters, including natural or artificial mineral waters and aerated waters; ice and snow" },
+            { code: "22021000", desc: "Waters, including mineral waters and aerated waters, containing added sugar or other sweetening matter or flavored" }
+        ]
+    },
+    {
+        category: "Footwear / Shoes",
+        pattern: /\b(shoes|sneakers|running\s*shoes|athletic\s*shoes|boots|sandals|slippers|loafers|footwear|flip\s*flops)\b/i,
+        headings: ["6402", "6403", "6404", "6405"],
+        allowedChapters: ["64"],
+        keywords: ["footwear rubber plastics", "sports footwear textile", "footwear leather uppers"],
+        fallbackCandidates: [
+            { code: "64041190", desc: "Sports footwear with outer soles of rubber or plastics and uppers of textile materials" },
+            { code: "64021990", desc: "Other sports footwear with outer soles and uppers of rubber or plastics" },
+            { code: "64039990", desc: "Footwear with outer soles of rubber, plastics, leather and uppers of leather" },
+            { code: "64041990", desc: "Footwear with outer soles of rubber or plastics and uppers of textile materials, other" }
+        ]
+    },
+    {
+        category: "Apparel / T-Shirts & Tops",
+        pattern: /\b(t-shirt|t\s*shirt|tee|polo\s*shirt|cotton\s*shirt|tank\s*top)\b/i,
+        headings: ["6109", "6205", "6206"],
+        allowedChapters: ["61", "62"],
+        keywords: ["t-shirts cotton knitted", "t-shirts man-made knitted"],
+        fallbackCandidates: [
+            { code: "61091000", desc: "T-shirts, singlets and other vests, knitted or crocheted, of cotton" },
+            { code: "61099010", desc: "T-shirts, singlets and other vests, knitted or crocheted, of man-made fibers" },
+            { code: "62052000", desc: "Men's or boys' shirts, not knitted, of cotton" }
+        ]
+    },
+    {
+        category: "Hoodies & Sweatshirts",
+        pattern: /\b(hoodie|sweatshirt|pullover|cardigan|sweater|fleece)\b/i,
+        headings: ["6110"],
+        allowedChapters: ["61"],
+        keywords: ["sweaters sweatshirts knitted", "hoodies cotton knitted"],
+        fallbackCandidates: [
+            { code: "61102020", desc: "Sweaters, pullovers, sweatshirts, knitted or crocheted, of cotton" },
+            { code: "61103030", desc: "Sweaters, pullovers, sweatshirts, knitted or crocheted, of man-made fibers" }
+        ]
+    },
+    {
+        category: "Trousers & Jeans",
+        pattern: /\b(jeans|denim|pants|trousers|shorts|tights|leggings)\b/i,
+        headings: ["6203", "6204", "6103", "6104"],
+        allowedChapters: ["61", "62"],
+        keywords: ["trousers cotton", "denim jeans"],
+        fallbackCandidates: [
+            { code: "62034240", desc: "Men's or boys' trousers, bib and brace overalls, breeches and shorts, of cotton: blue denim" },
+            { code: "62046240", desc: "Women's or girls' trousers, bib and brace overalls, breeches and shorts, of cotton: blue denim" }
+        ]
+    },
+    {
+        category: "Bags, Backpacks & Wallets",
+        pattern: /\b(backpack|handbag|tote\s*bag|shoulder\s*bag|duffel\s*bag|wallet|purse|suitcase|luggage|clutch|crossbody)\b/i,
+        headings: ["4202"],
+        allowedChapters: ["42"],
+        keywords: ["backpacks", "handbags", "wallets"],
+        fallbackCandidates: [
+            { code: "42029231", desc: "Travel, sports and similar bags: with outer surface of textile materials, backpacks" },
+            { code: "42022215", desc: "Handbags, with outer surface of plastic sheeting or textile materials" },
+            { code: "42023160", desc: "Articles of a kind normally carried in the pocket or handbag, with outer surface of leather" }
+        ]
+    },
+    {
+        category: "Mobile Cases & Covers",
+        pattern: /\b(phone\s*case|iphone\s*case|mobile\s*case|phone\s*cover|protective\s*case|airpods\s*case)\b/i,
+        headings: ["3926", "4202"],
+        allowedChapters: ["39", "42"],
+        keywords: ["case for mobile phone", "cellular phone cases of plastics"],
+        fallbackCandidates: [
+            { code: "39269099", desc: "Other articles of plastics: protective covers and cases for mobile cellular telephones" },
+            { code: "42023210", desc: "Articles carried in pocket: cases for cellular telephones with outer surface of sheeting of plastics" }
+        ]
+    },
+    {
+        category: "Chargers & Cables",
+        pattern: /\b(charger|charging\s*cable|usb\s*cable|type\s*c\s*cable|lightning\s*cable|power\s*adapter|fast\s*charger)\b/i,
+        headings: ["8504", "8544"],
+        allowedChapters: ["85"],
+        keywords: ["power supplies chargers", "insulated electric conductors usb cables"],
+        fallbackCandidates: [
+            { code: "85044095", desc: "Electrical transformers, static converters: power supplies, battery chargers for mobile devices" },
+            { code: "85444220", desc: "Insulated electric conductors fitted with connectors: cables for telecommunications (USB)" }
+        ]
+    },
+    {
+        category: "Headphones & Earbuds",
+        pattern: /\b(headphones|earbuds|earphones|headset|airpods|wireless\s*earbuds|bluetooth\s*earphones)\b/i,
+        headings: ["8518"],
+        allowedChapters: ["85"],
+        keywords: ["headphones earphones wireless"],
+        fallbackCandidates: [
+            { code: "85183020", desc: "Headphones and earphones, whether or not combined with a microphone: wireless bluetooth headsets" }
+        ]
+    },
+    {
+        category: "Cosmetics & Haircare",
+        pattern: /\b(shampoo|conditioner|hair\s*oil|face\s*cream|lotion|moisturizer|sunscreen|serum|perfume|cologne|lipstick|lip\s*balm|mascara|body\s*wash|soap)\b/i,
+        headings: ["3305", "3304", "3303", "3401"],
+        allowedChapters: ["33", "34"],
+        keywords: ["shampoos preparations for hair", "beauty or make-up preparations", "perfumes and toilet waters"],
+        fallbackCandidates: [
+            { code: "33051000", desc: "Preparations for use on the hair: shampoos" },
+            { code: "33059000", desc: "Preparations for use on the hair: hair conditioners, pomades, and styling products" },
+            { code: "33049950", desc: "Beauty or make-up preparations: skin lotions, moisturizers, and creams" },
+            { code: "33030000", desc: "Perfumes and toilet waters" },
+            { code: "34013000", desc: "Organic surface-active products for washing skin, liquid or cream" }
+        ]
+    },
+    {
+        category: "Bedding & Home Textiles",
+        pattern: /\b(bedsheet|bed\s*sheet|bedding|pillow|pillowcase|blanket|duvet|towel|bath\s*towel|curtain)\b/i,
+        headings: ["6302", "9404", "6303"],
+        allowedChapters: ["63", "94"],
+        keywords: ["bed linen cotton", "towels cotton", "articles of bedding pillows"],
+        fallbackCandidates: [
+            { code: "63023190", desc: "Bed linen, of cotton, not printed" },
+            { code: "63026000", desc: "Toilet linen and kitchen linen, of terry toweling or similar terry fabrics, of cotton" },
+            { code: "94049020", desc: "Articles of bedding: pillows, cushions and similar furnishings" }
+        ]
+    },
+    {
+        category: "Cookware & Kitchenware",
+        pattern: /\b(frying\s*pan|cookware|saucepan|pot|knife|chef\s*knife|kitchen\s*knife|spatula|cutting\s*board|lunch\s*box)\b/i,
+        headings: ["7323", "7615", "8211", "3924"],
+        allowedChapters: ["73", "76", "82", "39"],
+        keywords: ["kitchen articles stainless steel", "cookware aluminum", "kitchen knives"],
+        fallbackCandidates: [
+            { code: "73239300", desc: "Table, kitchen or other household articles and parts thereof, of stainless steel" },
+            { code: "76151030", desc: "Table, kitchen or other household articles of aluminum: cooking utensils" },
+            { code: "82119290", desc: "Knives having fixed blades: kitchen knives and butcher knives" }
+        ]
+    },
+    {
+        category: "Watches & Clocks",
+        pattern: /\b(wrist\s*watch|smartwatch|smart\s*watch|watch|clock)\b/i,
+        negativePattern: /\b(watch\s*strap|watch\s*band)\b/i,
+        headings: ["9102", "8517"],
+        allowedChapters: ["91", "85"],
+        keywords: ["wrist watches electronic", "smart watches transceivers"],
+        fallbackCandidates: [
+            { code: "85176200", desc: "Machines for the transmission or reception of voice, images or other data: smart watches" },
+            { code: "91021100", desc: "Wrist watches, electrically operated, with mechanical display only" }
+        ]
+    }
+];
+
+function matchProductTaxonomy(title) {
+    if (!title) return null;
+    const t = title.trim();
+    for (const rule of HTS_TAXONOMY_RULES) {
+        if (rule.pattern.test(t)) {
+            if (rule.negativePattern && rule.negativePattern.test(t)) continue;
+            return rule;
+        }
+    }
+    return null;
+}
+
+/**
+ * AI Heading and Category Extractor for products not covered by fast taxonomy
+ */
+async function extractAiHeadings(title) {
+    const cacheKey = title.trim().toLowerCase();
+    if (aiHeadingCache.has(cacheKey)) {
+        return aiHeadingCache.get(cacheKey);
+    }
+
+    try {
+        const chatModel = isDecisionModel(OPENROUTER_MODEL)
+            ? (process.env.OPENROUTER_CHAT_FALLBACK_MODEL || 'openrouter/free')
+            : OPENROUTER_MODEL;
+
+        const response = await openai.chat.completions.create({
+            model: chatModel,
+            temperature: 0,
+            max_tokens: 150,
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are an expert customs broker. Given a product title, return a JSON object with:\n1. "refinedName": clean customs product description (string)\n2. "headings": array of 2-4 most likely 4-digit HS heading numbers (e.g. ["8471", "8504"])\n3. "allowedChapters": array of 2-digit HS chapters (e.g. ["84", "85"])\nReturn ONLY valid JSON.'
+                },
+                { role: 'user', content: title }
+            ]
+        });
+
+        const raw = response.choices[0]?.message?.content || response.choices[0]?.message?.reasoning || '';
+        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            aiHeadingCache.set(cacheKey, parsed);
+            return parsed;
+        }
+    } catch (e) {
+        console.warn('extractAiHeadings error:', e.message);
+    }
+
+    return null;
+}
 
 // ── Marketing / filler words to strip before searching USITC (FREE, no LLM) ──
 const STOPWORDS = new Set([
@@ -399,67 +625,109 @@ app.post('/api/classify', async (req, res) => {
             articleDescription = match ? match.desc : "Manual Override - Official Description Not Found";
             
         } else {
-            // ── Step 1: Extract keywords programmatically (FREE — no LLM call) ──
-        console.log('Step 1: Extracting keywords (programmatic — no LLM)...');
-        const keywords = extractKeywords(productTitle);
-        console.log(`Extracted Keywords: ${keywords.join(', ')}`);
+            // ── Step 1: Smart Product Identification & Targeted HS Headings ──
+        let targetHeadings = [];
+        let allowedChapters = null;
+        let curatedFallback = [];
+        let identifiedCategory = "";
 
-        // ── Step 2: Search USITC with each keyword ──
-        console.log('Step 2: Fetching USITC Tariffs...');
-        let allCandidates = [];
-        for (const kw of keywords) {
-            const candidates = await searchTariffs(kw);
-            allCandidates = allCandidates.concat(candidates);
-        }
-
-        // ── Fallback: if programmatic keywords returned 0 results, use a cheap LLM call ──
-        if (allCandidates.length === 0) {
-            console.log('No USITC results from keywords. Falling back to LLM for HS code guess...');
-            try {
-                const chatModel = isDecisionModel(OPENROUTER_MODEL)
-                    ? (process.env.OPENROUTER_CHAT_FALLBACK_MODEL || 'openrouter/free')
-                    : OPENROUTER_MODEL;
-
-                const fallbackResponse = await openai.chat.completions.create({
-                    model: chatModel,
-                    temperature: 0,
-                    max_tokens: 150,
-                    messages: [
-                        { role: 'system', content: 'You are a customs classification engine. Given the product title, output the single most likely 4-digit HS heading number. Respond with ONLY the 4-digit number, nothing else.' },
-                        { role: 'user', content: productTitle }
-                    ]
-                });
-                const rawContent = fallbackResponse.choices[0]?.message?.content || fallbackResponse.choices[0]?.message?.reasoning || '';
-                const fallbackCode = rawContent.trim().replace(/[^0-9]/g, '').substring(0, 4);
-                console.log(`LLM fallback HS heading: ${fallbackCode}`);
-                if (fallbackCode.length === 4) {
-                    const fallbackCandidates = await searchTariffs(fallbackCode);
-                    allCandidates = allCandidates.concat(fallbackCandidates);
+        // Fast-path: Check instantaneous commercial HTS taxonomy (0ms)
+        const matchedTaxonomy = matchProductTaxonomy(productTitle);
+        if (matchedTaxonomy) {
+            console.log(`Step 1: Fast taxonomy match found: "${matchedTaxonomy.category}"`);
+            targetHeadings = matchedTaxonomy.headings;
+            allowedChapters = new Set(matchedTaxonomy.allowedChapters);
+            curatedFallback = matchedTaxonomy.fallbackCandidates;
+            identifiedCategory = matchedTaxonomy.category;
+            productName = cleanCustomsTitle(productTitle);
+        } else {
+            // Dynamic path: AI heading and category extractor (with in-memory cache)
+            console.log('Step 1: Extracting target headings via AI extractor...');
+            const aiInfo = await extractAiHeadings(productTitle);
+            if (aiInfo) {
+                targetHeadings = aiInfo.headings || [];
+                if (aiInfo.allowedChapters && aiInfo.allowedChapters.length > 0) {
+                    allowedChapters = new Set(aiInfo.allowedChapters);
                 }
-            } catch (fallbackErr) {
-                console.warn('LLM fallback guess failed, trying title word search:', fallbackErr.message);
-                const words = productTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2 && !STOPWORDS.has(w));
-                for (const word of words.slice(0, 3)) {
-                    const fallbackCandidates = await searchTariffs(word);
-                    if (fallbackCandidates.length > 0) {
-                        allCandidates = allCandidates.concat(fallbackCandidates);
-                        break;
-                    }
+                if (aiInfo.refinedName) {
+                    productName = aiInfo.refinedName;
                 }
             }
         }
-        
-        // Remove duplicates and limit to top 30
+
+        // ── Step 2: Fetch USITC Tariffs Targeted by Heading in Parallel ──
+        console.log(`Step 2: Fetching targeted USITC Tariffs for headings: [${targetHeadings.join(', ')}]...`);
+        let allCandidates = [];
+
+        // Search USITC for targeted 4-digit headings in parallel (blazing fast)
+        if (targetHeadings.length > 0) {
+            const headingPromises = targetHeadings.slice(0, 4).map(h => searchTariffs(h));
+            const results = await Promise.all(headingPromises);
+            for (const list of results) {
+                allCandidates = allCandidates.concat(list);
+            }
+        }
+
+        // Also search with meaningful extracted keywords if candidates are scarce
+        const keywords = extractKeywords(productTitle);
+        if (allCandidates.length < 5 && keywords.length > 0) {
+            const kwPromises = keywords.slice(0, 2).map(kw => searchTariffs(kw));
+            const kwResults = await Promise.all(kwPromises);
+            for (const list of kwResults) {
+                allCandidates = allCandidates.concat(list);
+            }
+        }
+
+        // Add curated fallback candidates for the identified category
+        if (curatedFallback.length > 0) {
+            allCandidates = allCandidates.concat(curatedFallback);
+        }
+
+        // ── Strict Chapter Filtering: Completely Eliminate Irrelevant Categories ──
+        // (e.g. Reject vegetables "07" for water bottles or drinking water!)
+        if (allowedChapters && allowedChapters.size > 0) {
+            const preFilterCount = allCandidates.length;
+            allCandidates = allCandidates.filter(c => {
+                const ch = String(c.code).replace(/\./g, '').substring(0, 2);
+                return allowedChapters.has(ch);
+            });
+            console.log(`Filtered candidates by allowed chapters [${Array.from(allowedChapters).join(',')}]: ${preFilterCount} → ${allCandidates.length}`);
+        }
+
+        // Deduplicate candidates
         const uniqueCandidatesMap = new Map();
         for (const c of allCandidates) {
-            if (!uniqueCandidatesMap.has(c.code)) {
-                uniqueCandidatesMap.set(c.code, c);
+            const normCode = String(c.code).replace(/\./g, '');
+            if (!uniqueCandidatesMap.has(normCode)) {
+                uniqueCandidatesMap.set(normCode, {
+                    code: normCode,
+                    description: c.desc || c.description || ''
+                });
             }
         }
-        
-        const topCandidates = Array.from(uniqueCandidatesMap.values()).slice(0, 30).map(c => ({
-            code: String(c.code).replace(/\./g, ''),  // normalize: strip dots
-            description: c.desc
+
+        // Rank candidates: Give highest priority to exact 4-digit heading matches and title keyword matches
+        const scoredCandidates = Array.from(uniqueCandidatesMap.values()).map(c => {
+            let score = 0;
+            const h4 = c.code.substring(0, 4);
+            const ch2 = c.code.substring(0, 2);
+            if (targetHeadings.includes(h4)) score += 100;
+            else if (allowedChapters && allowedChapters.has(ch2)) score += 50;
+
+            const titleWords = productTitle.toLowerCase().split(/\s+/);
+            const descLower = (c.description || '').toLowerCase();
+            for (const w of titleWords) {
+                if (w.length > 2 && !STOPWORDS.has(w) && descLower.includes(w)) {
+                    score += 15;
+                }
+            }
+            return { ...c, score };
+        });
+
+        scoredCandidates.sort((a, b) => b.score - a.score);
+        const topCandidates = scoredCandidates.slice(0, 25).map(c => ({
+            code: c.code,
+            description: c.description
         }));
         
         console.log(`Found ${allCandidates.length} raw candidates. Sending top ${topCandidates.length} unique candidates to model.`);

@@ -402,3 +402,56 @@ td {
 #teach-submit-btn:hover {
     box-shadow: 0 0 15px rgba(79, 172, 254, 0.4);
 }
+
+/* ── Progress Bar & Controls for Bulk Upload (1000 items) ── */
+.progress-container {
+    margin: 15px 0 20px 0;
+    padding: 16px 20px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+}
+.progress-container.hidden {
+    display: none;
+}
+.progress-bar-wrapper {
+    width: 100%;
+    height: 10px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 12px;
+}
+.progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #4facfe 0%, #00f2fe 100%);
+    transition: width 0.3s ease;
+    border-radius: 6px;
+}
+.progress-stats {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9rem;
+    color: rgba(255, 255, 255, 0.85);
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.stop-btn {
+    background: rgba(239, 68, 68, 0.2);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #f87171;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+.stop-btn:hover {
+    background: rgba(239, 68, 68, 0.4);
+    color: #fff;
+}
+.stop-btn.hidden {
+    display: none;
+}

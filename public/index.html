@@ -56,6 +56,16 @@
                         Download CSV
                     </button>
                 </div>
+                <div id="progress-container" class="progress-container hidden">
+                    <div class="progress-bar-wrapper">
+                        <div id="progress-bar-fill" class="progress-bar-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="progress-stats">
+                        <span id="progress-text">Processing: 0 / 0</span>
+                        <span id="progress-speed">Speed: 0 items/s</span>
+                        <button type="button" id="stop-btn" class="stop-btn hidden">Stop Processing</button>
+                    </div>
+                </div>
                 <div class="table-container">
                     <table id="results-table">
                         <thead>
